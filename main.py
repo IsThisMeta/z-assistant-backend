@@ -6,9 +6,8 @@ from langchain.tools import tool
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 import httpx
 import os
-from typing import Dict, Any, List
-import uuid
-from datetime import datetime
+from typing import Dict, Any
+from functools import partial
 
 app = FastAPI()
 
@@ -357,26 +356,7 @@ def tmdb_verify(title: str, year: int = None, media_type: str = "movie") -> Dict
     except Exception as e:
         return {"verified": False, "error": str(e)}
 
-@tool
-def add_to_stage(operation: str, items: List[Dict]) -> Dict[str, Any]:
-    """Add verified items to staging for bulk operations"""
-    stage_id = str(uuid.uuid4())
-    staged_items = {
-        "stage_id": stage_id,
-        "operation": operation,
-        "items": items,
-        "created": datetime.now().isoformat()
-    }
-    
-    # For now, just return the staging info
-    # In production, you'd store this in Redis or a database
-    return {
-        "stage_id": stage_id,
-        "staged_count": len(items),
-        "operation": operation,
-        "ready_for_ui": True,
-        "items": items  # Return items for immediate use
-    }
+
 
 # Helper function to create tools with servers injected
 def create_tools_with_servers(servers: dict):
@@ -417,16 +397,31 @@ def create_tools_with_servers(servers: dict):
     def search_movies_in_library_wrapped(query: str) -> Dict[str, Any]:
         """Search for movies already in your library"""
         return search_movies_in_library.func(query=query, servers=servers)
-    
+
     @tool
-    def tmdb_verify_wrapped(title: str, year: int = None, media_type: str = "movie") -> Dict[str, Any]:
-        """Quick TMDB verification for movies or TV shows - returns clean data"""
-        return tmdb_verify.func(title=title, year=year, media_type=media_type)
+    def add_to_stage(operation: str, items: List[Dict]) -> Dict[str, Any]:
+    """Add verified items to staging for bulk operations"""
+        import uuid
+        from datetime import datetime
     
-    @tool
-    def add_to_stage_wrapped(operation: str, items: List[Dict]) -> Dict[str, Any]:
-        """Add verified items to staging for bulk operations"""
-        return add_to_stage.func(operation=operation, items=items)
+    stage_id = str(uuid.uuid4())
+    staged_items = {
+        "stage_id": stage_id,
+        "operation": operation,
+        "items": items,
+        "created": datetime.now().isoformat()
+    }
+    
+    # For now, just return the staging info
+    # In production, you'd store this in Redis or a database
+    return {
+        "stage_id": stage_id,
+        "staged_count": len(items),
+        "operation": operation,
+        "ready_for_ui": True,
+        "items": items  # Return items for immediate use
+    }
+
     
     return [
         get_library_stats_wrapped,
@@ -434,15 +429,13 @@ def create_tools_with_servers(servers: dict):
         get_all_shows_wrapped,
         get_all_movies_wrapped,
         add_movie_to_radarr_wrapped,
-        delete_movie_wrapped,
-        search_movies_in_library_wrapped,
-        tmdb_verify_wrapped,
-        add_to_stage_wrapped
+        delete_movie_wrapped,  # NEW
+        search_movies_in_library_wrapped  # NEW
     ]
 
 # Create the model
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash",
+    model="gemini-2.5-flash-lite-preview-06-17",
     temperature=0.3,
     max_retries=2,
 )
@@ -477,11 +470,6 @@ When asked to delete media:
 2. Confirm what you're about to delete only if there is ambiguity
 3. Delete with files by default unless user says otherwise
 4. Report what was deleted
-
-When working with multiple items:
-1. Use tmdb_verify to check each item
-2. Use add_to_stage to prepare bulk operations
-3. Report what will be staged for the user
 
 Never make up data - always use tools to get real information."""),
     ("human", "{input}"),

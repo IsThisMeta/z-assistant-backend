@@ -23,7 +23,7 @@ os.environ["GOOGLE_API_KEY"] = "AIzaSyCPiEumwTgh8NqH2P5CRjzw78seF10QD_w"
 # Initialize Supabase client
 supabase: Client = create_client(
     os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
-    os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Use service role key to bypass RLS
 )
 
 class ChatRequest(BaseModel):

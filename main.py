@@ -29,6 +29,7 @@ supabase: Client = create_client(
 class ChatRequest(BaseModel):
     message: str
     servers: dict  # Required - contains radarr and sonarr configs
+    context: str = None  # Optional context like "discover"
 
 # Define tools that accept servers parameter
 @tool
@@ -459,7 +460,8 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
             "operation": operation,
             "ready_for_ui": True,
             "items": processed_items,
-            "saved": True
+            "saved": True,
+            "message": f"Staged {len(processed_items)} items with stage_id: {stage_id}"
         }
     except Exception as e:
         # If Supabase fails, still return the staging info
@@ -547,6 +549,22 @@ llm = ChatGoogleGenerativeAI(
 prompt = ChatPromptTemplate.from_messages([
     ("system", """You are Z, a media server assistant. Use tools to get real data.
 
+DISCOVER VIEW CONTEXT:
+When the context is "discover", follow these special rules:
+1. ALWAYS use tmdb_verify to verify EACH item found
+2. ALWAYS use add_to_stage to stage ALL verified results
+3. Your ONLY response should be the stage_id returned by add_to_stage - nothing else
+4. Do NOT include any text, confirmation, or explanation - just the stage_id
+5. Do NOT add items directly - just verify and stage them for visual browsing
+6. Response format: just the stage_id like "abc-123-def-456"
+
+Examples for Discover context:
+- "show me all nolan movies" → Find all Nolan films, verify each, stage all
+- "sci-fi movies from the 90s" → Search, verify all results, stage them
+- "movies like the matrix" → Find similar films, verify, stage all
+- Natural language returns visual results, not text explanations
+
+REGULAR CONTEXT (when not from Discover):
 IMPORTANT: Be smart and decisive. When users ask for something obvious, don't overthink it:
 - "The Matrix" = The Matrix (1999), not the sequels
 - "Star Wars" = Star Wars: A New Hope (1977)
@@ -594,12 +612,29 @@ async def chat(request: ChatRequest):
         agent = create_tool_calling_agent(llm, user_tools, prompt)
         agent_executor = AgentExecutor(agent=agent, tools=user_tools, verbose=True)
         
+        # Add context to message if provided
+        input_message = request.message
+        if request.context == "discover":
+            input_message = f"[CONTEXT: DISCOVER VIEW] {request.message}"
+            print(f"🎨 Discover context detected - AI will stage results for visual display")
+        
         # Execute the request
         result = agent_executor.invoke({
-            "input": request.message
+            "input": input_message
         })
         
-        return {"response": result["output"]}
+        # If discover context and we have a stage_id in the response, include it
+        response_data = {"response": result["output"]}
+        
+        # For discover context, the AI should only return the stage_id
+        if request.context == "discover":
+            # The entire output should be just the stage_id
+            stage_id = result["output"].strip()
+            response_data["stage_id"] = stage_id
+            response_data["response"] = stage_id  # Keep it simple
+            print(f"🎯 Discover mode - stage_id: {stage_id}")
+        
+        return response_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

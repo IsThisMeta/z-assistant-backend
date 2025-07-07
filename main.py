@@ -599,6 +599,19 @@ IMPORTANT: Be smart and decisive. When users ask for something obvious, don't ov
 - "The Godfather" = The Godfather (1972), not Part II
 - For any movie series, assume they mean the FIRST/ORIGINAL movie unless they specify otherwise
 
+COMPLEX REQUESTS (like "all movies by a director" or "sci-fi from the 90s"):
+1. THINK FIRST - use your knowledge about the topic
+2. Be COMPREHENSIVE - don't stop at 5-6 items when there are more
+3. Consider using web search if you need complete lists
+4. Search for EACH item you know about
+5. Directors often have 10-20+ films - find them ALL
+
+For example, Christopher Nolan has directed:
+- Early works: Following (1998), Memento (2000), Insomnia (2002)
+- Batman trilogy: Batman Begins (2005), The Dark Knight (2008), The Dark Knight Rises (2012)
+- Other films: The Prestige (2006), Inception (2010), Interstellar (2014), Dunkirk (2017), Tenet (2020), Oppenheimer (2023)
+Don't be lazy - find ALL their works!
+
 For TV shows:
 - Always add just Season 1 (pilot season) by default unless the user specifies otherwise
 - "Add The Office" = Add Season 1 only
@@ -613,16 +626,18 @@ When users want to find media:
 
 DISCOVER VIEW REQUESTS:
 If the message contains "[CONTEXT: DISCOVER VIEW]":
-1. Search broadly - include many relevant results
-2. Stage ALL good matches (5-20 items)
-3. Respond with ONLY the stage_id, nothing else
+1. THINK about what the user wants - be comprehensive!
+2. Search broadly - include ALL relevant results (aim for 10-20 items)
+3. Don't stop early - if searching for "all Nolan movies", find ALL of them
+4. Stage everything you find
+5. Respond with ONLY the stage_id, nothing else
 
 When asked to delete media:
 1. First search for it in the library to get the ID
 2. Delete with files by default unless user says otherwise
 3. Report what was deleted
 
-Never make up data - always use tools to get real information."""),
+Never make up data - always use tools to get real information. But DO use your knowledge to be thorough!"""),
     ("human", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
@@ -635,7 +650,12 @@ async def chat(request: ChatRequest):
         
         # Create agent with user's tools
         agent = create_tool_calling_agent(llm, user_tools, prompt)
-        agent_executor = AgentExecutor(agent=agent, tools=user_tools, verbose=True)
+        agent_executor = AgentExecutor(
+            agent=agent, 
+            tools=user_tools, 
+            verbose=True,
+            max_iterations=25  # Increased to handle comprehensive searches
+        )
         
         # Add context to message if provided
         input_message = request.message

@@ -373,24 +373,92 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
+    # Enrich items with fresh TMDB data
+    processed_items = []
+    tmdb_api_key = "eaba5719606a782018d06df21c4fe459"
+    
+    for item in items:
+        # Just need the basics from AI
+        tmdb_id = item.get("tmdb_id")
+        media_type = item.get("media_type", "movie")
+        
+        if not tmdb_id:
+            print(f"⚠️ Skipping item without tmdb_id: {item}")
+            continue
+            
+        # Fetch full data from TMDB
+        try:
+            endpoint = "movie" if media_type == "movie" else "tv"
+            tmdb_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
+            
+            response = httpx.get(
+                tmdb_url,
+                params={"api_key": tmdb_api_key},
+                timeout=5.0
+            )
+            
+            if response.status_code == 200:
+                tmdb_data = response.json()
+                
+                # Extract year properly
+                year = 0
+                if media_type == "movie" and tmdb_data.get("release_date"):
+                    year = int(tmdb_data["release_date"][:4])
+                elif media_type == "tv" and tmdb_data.get("first_air_date"):
+                    year = int(tmdb_data["first_air_date"][:4])
+                
+                processed_item = {
+                    "tmdb_id": int(tmdb_id),
+                    "title": tmdb_data.get("title" if media_type == "movie" else "name", "Unknown"),
+                    "year": year,
+                    "media_type": media_type,
+                    "poster_path": tmdb_data.get("poster_path", ""),
+                    "verified": True  # Already verified if we got TMDB data
+                }
+                processed_items.append(processed_item)
+                print(f"✅ Enriched: {processed_item['title']} ({processed_item['year']}) with poster: {processed_item['poster_path']}")
+            else:
+                print(f"❌ TMDB API error for {tmdb_id}: {response.status_code}")
+                # Still add basic item even if TMDB fails
+                processed_items.append({
+                    "tmdb_id": int(tmdb_id),
+                    "title": item.get("title", "Unknown"),
+                    "year": 0,
+                    "media_type": media_type,
+                    "poster_path": "",
+                    "verified": False
+                })
+        except Exception as e:
+            print(f"❌ Error fetching TMDB data for {tmdb_id}: {e}")
+            # Still add basic item
+            processed_items.append({
+                "tmdb_id": int(tmdb_id),
+                "title": item.get("title", "Unknown"),
+                "year": 0,
+                "media_type": media_type,
+                "poster_path": "",
+                "verified": False
+            })
+    
     # Save to Supabase
     try:
         data = {
             "stage_id": stage_id,
             "operation": operation,
-            "items": items,
+            "items": processed_items,
             "status": "pending",
-            "user_id": user_id  # Will be None for now, add auth later
+            "user_id": user_id
         }
         
         result = supabase.table("staged_operations").insert(data).execute()
+        print(f"✅ Saved to Supabase: stage_id={stage_id} with {len(processed_items)} enriched items")
         
         return {
             "stage_id": stage_id,
-            "staged_count": len(items),
+            "staged_count": len(processed_items),
             "operation": operation,
             "ready_for_ui": True,
-            "items": items,
+            "items": processed_items,
             "saved": True
         }
     except Exception as e:
@@ -398,10 +466,10 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
         print(f"Failed to save to Supabase: {e}")
         return {
             "stage_id": stage_id,
-            "staged_count": len(items),
+            "staged_count": len(processed_items),
             "operation": operation,
             "ready_for_ui": True,
-            "items": items,
+            "items": processed_items,
             "saved": False,
             "error": str(e)
         }

@@ -584,7 +584,7 @@ def create_tools_with_servers(servers: dict):
 
 # Create the model
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-flash-lite-preview-06-17",
+    model="gemini-2.5-flash",
     temperature=0.3,
     max_retries=2,
 )

@@ -373,55 +373,35 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
-    # Process items to ensure they have all necessary fields
-    processed_items = []
-    for item in items:
-        # Ensure we have all required fields from tmdb_verify
-        processed_item = {
-            "tmdb_id": int(item.get("tmdb_id", 0)),
-            "title": item.get("title", ""),
-            "year": int(item.get("year", 0)) if item.get("year") else 0,
-            "poster_path": item.get("poster_path", ""),  # This is crucial!
-            "media_type": item.get("media_type", "movie"),
-            "verified": item.get("verified", True)
-        }
-        
-        # Debug logging to see what we're getting vs storing
-        print(f"📥 Received item: {item}")
-        print(f"📤 Processed item: {processed_item}")
-        
-        processed_items.append(processed_item)
-    
     # Save to Supabase
     try:
         data = {
             "stage_id": stage_id,
             "operation": operation,
-            "items": processed_items,  # Use processed items with all fields
+            "items": items,
             "status": "pending",
             "user_id": user_id  # Will be None for now, add auth later
         }
         
         result = supabase.table("staged_operations").insert(data).execute()
-        print(f"✅ Saved to Supabase: stage_id={stage_id} with {len(processed_items)} items")
         
         return {
             "stage_id": stage_id,
-            "staged_count": len(processed_items),
+            "staged_count": len(items),
             "operation": operation,
             "ready_for_ui": True,
-            "items": processed_items,
+            "items": items,
             "saved": True
         }
     except Exception as e:
         # If Supabase fails, still return the staging info
-        print(f"❌ Failed to save to Supabase: {e}")
+        print(f"Failed to save to Supabase: {e}")
         return {
             "stage_id": stage_id,
-            "staged_count": len(processed_items),
+            "staged_count": len(items),
             "operation": operation,
             "ready_for_ui": True,
-            "items": processed_items,
+            "items": items,
             "saved": False,
             "error": str(e)
         }

@@ -326,48 +326,86 @@ def get_all_movies(servers: dict) -> Dict[str, Any]:
         return {"error": str(e)}
 
 @tool
-def tmdb_verify(title: str, year: int = None, media_type: str = "movie") -> Dict[str, Any]:
-    """Quick TMDB verification for movies or TV shows - returns clean data"""
+def search_movies(query: str) -> Dict[str, Any]:
+    """Search for movies on TMDB and return a list of results"""
+    print(f"🔧 TOOL CALLED: search_movies - Query: {query}")
+    
     try:
-        # Determine search endpoint
-        endpoint = "movie" if media_type == "movie" else "tv"
-        search_url = f"https://api.themoviedb.org/3/search/{endpoint}"
-        
+        search_url = "https://api.themoviedb.org/3/search/movie"
         params = {
             "api_key": "eaba5719606a782018d06df21c4fe459",
-            "query": title,
-            "year": year if year else None
+            "query": query
         }
         
         response = httpx.get(search_url, params=params, timeout=5.0)
         if response.status_code == 200:
             results = response.json().get("results", [])
-            if results:
-                item = results[0]  # Best match
+            
+            # Return top 5 results with relevant info
+            movies = []
+            for item in results[:5]:
+                year = None
+                if item.get("release_date"):
+                    try:
+                        year = int(item["release_date"][:4])
+                    except:
+                        pass
                 
-                # Different fields for movies vs shows
-                if media_type == "movie":
-                    return {
-                        "tmdb_id": item["id"],
-                        "title": item["title"],
-                        "year": int(item.get("release_date", "0")[:4]) if item.get("release_date") else None,
-                        "poster_path": item.get("poster_path"),
-                        "media_type": "movie",
-                        "verified": True
-                    }
-                else:  # TV show
-                    return {
-                        "tmdb_id": item["id"],
-                        "title": item["name"],
-                        "year": int(item.get("first_air_date", "0")[:4]) if item.get("first_air_date") else None,
-                        "poster_path": item.get("poster_path"),
-                        "media_type": "tv",
-                        "verified": True
-                    }
+                movies.append({
+                    "tmdb_id": item["id"],
+                    "title": item["title"],
+                    "year": year,
+                    "poster_path": item.get("poster_path"),
+                    "overview": item.get("overview", "")[:200] + "..." if item.get("overview") else ""
+                })
+            
+            print(f"  ✓ Found {len(movies)} movie results")
+            return {"movies": movies, "total_found": len(results)}
         
-        return {"verified": False, "error": "Not found on TMDB"}
+        return {"movies": [], "error": f"API error: {response.status_code}"}
     except Exception as e:
-        return {"verified": False, "error": str(e)}
+        return {"movies": [], "error": str(e)}
+
+@tool
+def search_shows(query: str) -> Dict[str, Any]:
+    """Search for TV shows on TMDB and return a list of results"""
+    print(f"🔧 TOOL CALLED: search_shows - Query: {query}")
+    
+    try:
+        search_url = "https://api.themoviedb.org/3/search/tv"
+        params = {
+            "api_key": "eaba5719606a782018d06df21c4fe459",
+            "query": query
+        }
+        
+        response = httpx.get(search_url, params=params, timeout=5.0)
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            
+            # Return top 5 results with relevant info
+            shows = []
+            for item in results[:5]:
+                year = None
+                if item.get("first_air_date"):
+                    try:
+                        year = int(item["first_air_date"][:4])
+                    except:
+                        pass
+                
+                shows.append({
+                    "tmdb_id": item["id"],
+                    "title": item["name"],
+                    "year": year,
+                    "poster_path": item.get("poster_path"),
+                    "overview": item.get("overview", "")[:200] + "..." if item.get("overview") else ""
+                })
+            
+            print(f"  ✓ Found {len(shows)} TV show results")
+            return {"shows": shows, "total_found": len(results)}
+        
+        return {"shows": [], "error": f"API error: {response.status_code}"}
+    except Exception as e:
+        return {"shows": [], "error": str(e)}
 
 @tool
 def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict[str, Any]:
@@ -517,9 +555,14 @@ def create_tools_with_servers(servers: dict):
         return search_movies_in_library.func(query=query, servers=servers)
     
     @tool
-    def tmdb_verify_wrapped(title: str, year: int = None, media_type: str = "movie") -> Dict[str, Any]:
-        """Quick TMDB verification for movies or TV shows - returns clean data"""
-        return tmdb_verify.func(title=title, year=year, media_type=media_type)
+    def search_movies_wrapped(query: str) -> Dict[str, Any]:
+        """Search for movies on TMDB and return a list of results"""
+        return search_movies.func(query=query)
+    
+    @tool
+    def search_shows_wrapped(query: str) -> Dict[str, Any]:
+        """Search for TV shows on TMDB and return a list of results"""
+        return search_shows.func(query=query)
     
     @tool
     def add_to_stage_wrapped(operation: str, items: List[Dict]) -> Dict[str, Any]:
@@ -534,7 +577,8 @@ def create_tools_with_servers(servers: dict):
         add_movie_to_radarr_wrapped,
         delete_movie_wrapped,
         search_movies_in_library_wrapped,
-        tmdb_verify_wrapped,
+        search_movies_wrapped,
+        search_shows_wrapped,
         add_to_stage_wrapped
     ]
 
@@ -549,22 +593,6 @@ llm = ChatGoogleGenerativeAI(
 prompt = ChatPromptTemplate.from_messages([
     ("system", """You are Z, a media server assistant. Use tools to get real data.
 
-DISCOVER VIEW CONTEXT:
-When the context is "discover", follow these special rules:
-1. ALWAYS use tmdb_verify to verify EACH item found
-2. ALWAYS use add_to_stage to stage ALL verified results
-3. Your ONLY response should be the stage_id returned by add_to_stage - nothing else
-4. Do NOT include any text, confirmation, or explanation - just the stage_id
-5. Do NOT add items directly - just verify and stage them for visual browsing
-6. Response format: just the stage_id like "abc-123-def-456"
-
-Examples for Discover context:
-- "show me all nolan movies" → Find all Nolan films, verify each, stage all
-- "sci-fi movies from the 90s" → Search, verify all results, stage them
-- "movies like the matrix" → Find similar films, verify, stage all
-- Natural language returns visual results, not text explanations
-
-REGULAR CONTEXT (when not from Discover):
 IMPORTANT: Be smart and decisive. When users ask for something obvious, don't overthink it:
 - "The Matrix" = The Matrix (1999), not the sequels
 - "Star Wars" = Star Wars: A New Hope (1977)
@@ -575,27 +603,24 @@ For TV shows:
 - Always add just Season 1 (pilot season) by default unless the user specifies otherwise
 - "Add The Office" = Add Season 1 only
 - "Add all of The Office" or "Add The Office complete series" = Add all seasons
-- This gives users a chance to try shows without committing to 10 seasons
 
-Only ask for clarification when there's TRUE ambiguity (like two completely different movies with the same name).
+SEARCHING AND STAGING:
+When users want to find media:
+1. Use search_movies or search_shows to find options
+2. Pick the most relevant results from the search
+3. Use add_to_stage to stage them for the UI
+4. For ambiguous searches, include multiple relevant results
 
-When asked for recommendations:
-1. First check what shows the user has
-2. Analyze their taste based on genres/themes
-3. Recommend a movie that fits their taste
-4. Search for it to get the TMDB ID
-5. Add it to their library
+DISCOVER VIEW REQUESTS:
+If the message contains "[CONTEXT: DISCOVER VIEW]":
+1. Search broadly - include many relevant results
+2. Stage ALL good matches (5-20 items)
+3. Respond with ONLY the stage_id, nothing else
 
 When asked to delete media:
 1. First search for it in the library to get the ID
-2. Confirm what you're about to delete only if there is ambiguity
-3. Delete with files by default unless user says otherwise
-4. Report what was deleted
-
-When working with multiple items:
-1. Use tmdb_verify to check each item
-2. Use add_to_stage to prepare bulk operations
-3. Report what will be staged for the user
+2. Delete with files by default unless user says otherwise
+3. Report what was deleted
 
 Never make up data - always use tools to get real information."""),
     ("human", "{input}"),

@@ -17,8 +17,12 @@ load_dotenv()
 
 app = FastAPI()
 
-# Set API key
-os.environ["GOOGLE_API_KEY"] = "AIzaSyCPiEumwTgh8NqH2P5CRjzw78seF10QD_w"
+# Set API key from environment
+google_api_key = os.getenv("GOOGLE_API_KEY")
+if google_api_key:
+    os.environ["GOOGLE_API_KEY"] = google_api_key
+else:
+    print("⚠️ WARNING: GOOGLE_API_KEY not found in environment")
 
 # Initialize Supabase client
 supabase: Client = create_client(

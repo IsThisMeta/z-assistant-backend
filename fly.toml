@@ -1,5 +1,5 @@
-app = "umikaze"
-primary_region = "sea"
+app = "z-assistant"
+primary_region = "sjc"
 
 [build]
   [build.args]

@@ -815,6 +815,35 @@ def execute_function(function_name: str, arguments: dict, servers: dict) -> dict
 @app.post("/chat")
 async def chat(request: ChatRequest):
     try:
+        # Special test case - bypass AI and return mock Nolan data
+        if request.message.strip().lower() == "testing123" and request.context == "discover":
+            print("🧪 TEST MODE: Creating mock Christopher Nolan stage")
+
+            # Christopher Nolan filmography
+            nolan_movies = [
+                {"tmdb_id": 77, "media_type": "movie"},      # Memento
+                {"tmdb_id": 155, "media_type": "movie"},     # The Dark Knight
+                {"tmdb_id": 1124, "media_type": "movie"},    # The Prestige
+                {"tmdb_id": 27205, "media_type": "movie"},   # Inception
+                {"tmdb_id": 49026, "media_type": "movie"},   # The Dark Knight Rises
+                {"tmdb_id": 157336, "media_type": "movie"},  # Interstellar
+                {"tmdb_id": 324857, "media_type": "movie"},  # Spider (JK - Dunkirk)
+                {"tmdb_id": 324857, "media_type": "movie"},  # Dunkirk
+                {"tmdb_id": 475557, "media_type": "movie"},  # Joker (JK - actually Tenet)
+                {"tmdb_id": 577922, "media_type": "movie"},  # Tenet
+                {"tmdb_id": 872585, "media_type": "movie"},  # Oppenheimer
+                {"tmdb_id": 272, "media_type": "movie"},     # Batman Begins
+                {"tmdb_id": 496, "media_type": "movie"},     # Following
+                {"tmdb_id": 320, "media_type": "movie"},     # Insomnia
+            ]
+
+            # Create staged operation
+            result = add_to_stage("discover", nolan_movies)
+            stage_id = result.get("stage_id")
+
+            print(f"🎯 Test stage created: {stage_id}")
+            return {"response": stage_id, "stage_id": stage_id}
+
         # Prepare input message
         input_message = request.message
         if request.context == "discover":

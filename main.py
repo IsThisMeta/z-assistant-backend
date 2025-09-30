@@ -565,6 +565,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
                     "year": year,
                     "media_type": media_type,
                     "poster_path": tmdb_data.get("poster_path", ""),
+                    "overview": tmdb_data.get("overview", ""),
                     "verified": True  # Already verified if we got TMDB data
                 }
                 processed_items.append(processed_item)
@@ -578,6 +579,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
                     "year": 0,
                     "media_type": media_type,
                     "poster_path": "",
+                    "overview": "",
                     "verified": False
                 })
         except Exception as e:
@@ -589,6 +591,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
                 "year": 0,
                 "media_type": media_type,
                 "poster_path": "",
+                "overview": "",
                 "verified": False
             })
     
@@ -663,6 +666,9 @@ For TV shows:
 SEARCHING AND STAGING:
 When users want to find media:
 1. Use search_movies or search_shows to find options
+   - CRITICAL: NEVER include years in the query parameter (e.g., use "Hereditary" not "Hereditary 2018")
+   - Years make TMDB search fail - it returns 0 results
+   - Search with just the title, then filter by year from the results if needed
 2. Pick the most relevant results from the search
 3. Use add_to_stage to stage them for the UI
 4. For ambiguous searches, include multiple relevant results
@@ -710,11 +716,11 @@ def get_tool_definitions():
         {
             "type": "function",
             "name": "search_movies",
-            "description": "Search for movies on TMDB. Returns director information for filtering.",
+            "description": "Search for movies on TMDB. IMPORTANT: Only use movie title in query - do NOT include years (e.g., use 'Hereditary' not 'Hereditary 2018'). Returns director information for filtering.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Movie title to search for"}
+                    "query": {"type": "string", "description": "Movie title ONLY - do not include year"}
                 },
                 "required": ["query"],
                 "additionalProperties": False
@@ -724,11 +730,11 @@ def get_tool_definitions():
         {
             "type": "function",
             "name": "search_shows",
-            "description": "Search for TV shows on TMDB.",
+            "description": "Search for TV shows on TMDB. IMPORTANT: Only use show title in query - do NOT include years.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "TV show title to search for"}
+                    "query": {"type": "string", "description": "TV show title ONLY - do not include year"}
                 },
                 "required": ["query"],
                 "additionalProperties": False
@@ -815,35 +821,6 @@ def execute_function(function_name: str, arguments: dict, servers: dict) -> dict
 @app.post("/chat")
 async def chat(request: ChatRequest):
     try:
-        # Special test case - bypass AI and return mock Nolan data
-        if request.message.strip().lower() == "testing123" and request.context == "discover":
-            print("🧪 TEST MODE: Creating mock Christopher Nolan stage")
-
-            # Christopher Nolan filmography
-            nolan_movies = [
-                {"tmdb_id": 77, "media_type": "movie"},      # Memento
-                {"tmdb_id": 155, "media_type": "movie"},     # The Dark Knight
-                {"tmdb_id": 1124, "media_type": "movie"},    # The Prestige
-                {"tmdb_id": 27205, "media_type": "movie"},   # Inception
-                {"tmdb_id": 49026, "media_type": "movie"},   # The Dark Knight Rises
-                {"tmdb_id": 157336, "media_type": "movie"},  # Interstellar
-                {"tmdb_id": 324857, "media_type": "movie"},  # Spider (JK - Dunkirk)
-                {"tmdb_id": 324857, "media_type": "movie"},  # Dunkirk
-                {"tmdb_id": 475557, "media_type": "movie"},  # Joker (JK - actually Tenet)
-                {"tmdb_id": 577922, "media_type": "movie"},  # Tenet
-                {"tmdb_id": 872585, "media_type": "movie"},  # Oppenheimer
-                {"tmdb_id": 272, "media_type": "movie"},     # Batman Begins
-                {"tmdb_id": 496, "media_type": "movie"},     # Following
-                {"tmdb_id": 320, "media_type": "movie"},     # Insomnia
-            ]
-
-            # Create staged operation
-            result = add_to_stage("discover", nolan_movies)
-            stage_id = result.get("stage_id")
-
-            print(f"🎯 Test stage created: {stage_id}")
-            return {"response": stage_id, "stage_id": stage_id}
-
         # Prepare input message
         input_message = request.message
         if request.context == "discover":
@@ -947,4 +924,30 @@ async def get_staged_operation(stage_id: str):
         else:
             raise HTTPException(status_code=404, detail="Staged operation not found")
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/test/create-mock-data")
+async def create_mock_data():
+    """Create mock staged operation with movies and TV shows for testing"""
+    try:
+        # Mix of movies and TV shows
+        test_items = [
+            {"tmdb_id": 155, "media_type": "movie"},      # The Dark Knight
+            {"tmdb_id": 424, "media_type": "movie"},      # Schindler's List
+            {"tmdb_id": 550, "media_type": "movie"},      # Fight Club
+            {"tmdb_id": 1396, "media_type": "tv"},        # Breaking Bad
+            {"tmdb_id": 1399, "media_type": "tv"},        # Game of Thrones
+            {"tmdb_id": 13916, "media_type": "movie"},    # Whiplash
+        ]
+
+        result = add_to_stage("discover", test_items)
+        return {
+            "success": True,
+            "stage_id": result["stage_id"],
+            "message": f"Created test data with {result['staged_count']} items",
+            "items": result["items"]
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

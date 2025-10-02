@@ -1,14 +1,26 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Header, Depends
+from pydantic import BaseModel, validator
 from openai import OpenAI
 import httpx
 import os
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from collections import defaultdict
+import re
+import time
+import logging
+from upstash_redis import Redis
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -18,16 +30,162 @@ app = FastAPI()
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# Initialize Supabase client
+# Initialize Supabase client (for auth - will use user's token for RLS)
 supabase: Client = create_client(
     os.getenv("NEXT_PUBLIC_SUPABASE_URL"),
-    os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Use service role key to bypass RLS
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # Only for admin operations
 )
+
+# Get TMDB API key from environment
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eaba5719606a782018d06df21c4fe459")
+
+# Initialize Upstash Redis for distributed rate limiting
+redis_client = None
+try:
+    upstash_url = os.getenv("UPSTASH_REDIS_REST_URL")
+    upstash_token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+
+    if upstash_url and upstash_token:
+        redis_client = Redis(url=upstash_url, token=upstash_token)
+        logger.info("✅ Upstash Redis initialized for rate limiting")
+    else:
+        logger.warning("⚠️  Upstash credentials not found - rate limiting disabled")
+except Exception as e:
+    logger.error(f"⚠️  Failed to initialize Upstash Redis: {e}")
+    redis_client = None
+
+# Rate limiting configuration
+RATE_LIMIT_REQUESTS = 40  # requests per 3 hours (like ChatGPT)
+RATE_LIMIT_WINDOW = 10800  # 3 hours in seconds
 
 class ChatRequest(BaseModel):
     message: str
     servers: dict  # Required - contains radarr and sonarr configs
-    context: str = None  # Optional context like "discover"
+    context: Optional[str] = None  # Optional context like "discover"
+
+    @validator('servers')
+    def validate_servers(cls, v):
+        """Validate server configuration"""
+        if not isinstance(v, dict):
+            raise ValueError('servers must be a dictionary')
+
+        # Validate URLs if radarr/sonarr exist
+        for service in ['radarr', 'sonarr']:
+            if service in v:
+                if not isinstance(v[service], dict):
+                    raise ValueError(f'{service} must be a dictionary')
+
+                # Validate URL format
+                url = v[service].get('url', '')
+                if url and not re.match(r'^https?://', url):
+                    raise ValueError(f'{service} URL must start with http:// or https://')
+
+                # Validate API key exists
+                if 'api_key' not in v[service]:
+                    raise ValueError(f'{service} must have an api_key')
+
+        return v
+
+# Security Functions
+async def verify_mega_subscription(authorization: str = Header(None)) -> str:
+    """Verify user has active Mega subscription and return user_id"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    # Extract bearer token
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format. Use: Bearer <token>")
+
+    token = authorization.replace("Bearer ", "")
+
+    try:
+        # TEST MODE: Allow "test-bypass" token for development
+        if token == "test-bypass":
+            logger.warning("⚠️  TEST MODE: Bypassing authentication with test user")
+            return "test-user-rate-limit"
+
+        # Verify token with Supabase
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user if hasattr(user_response, 'user') else user_response
+
+        if not user or not user.id:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+        user_id = user.id
+
+        # Check if user has active Mega subscription using RPC
+        result = supabase.rpc('has_active_mega', params={'p_user_id': user_id}).execute()
+
+        if not result.data:
+            raise HTTPException(
+                status_code=403,
+                detail="Zagreus Mega subscription required. Upgrade in Settings > Subscriptions."
+            )
+
+        return user_id
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Auth error: {e}")
+        raise HTTPException(status_code=401, detail="Authentication failed")
+
+async def check_rate_limit(user_id: str):
+    """Check and enforce rate limits per user using Upstash Redis"""
+    if not redis_client:
+        # Redis not available - skip rate limiting (dev mode)
+        print(f"⚠️  Rate limiting skipped for {user_id} (Redis not configured)")
+        return
+
+    # Use Redis sorted set for time-based rate limiting
+    # Key format: ratelimit:{user_id}
+    # Score: timestamp
+    # Value: unique request ID
+    key = f"ratelimit:{user_id}"
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+
+    try:
+        # Remove old entries outside the time window
+        redis_client.zremrangebyscore(key, 0, window_start)
+
+        # Count requests in current window
+        count = redis_client.zcard(key)
+
+        # Check if limit exceeded
+        if count >= RATE_LIMIT_REQUESTS:
+            # Get the oldest request timestamp
+            oldest = redis_client.zrange(key, 0, 0, withscores=True)
+            if oldest:
+                oldest_time = oldest[0][1]
+                retry_after = int(oldest_time + RATE_LIMIT_WINDOW - now)
+
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+                    headers={"Retry-After": str(retry_after)}
+                )
+
+        # Add current request with timestamp as score
+        request_id = f"{now}:{uuid.uuid4()}"
+        redis_client.zadd(key, {request_id: now})
+
+        # Set expiry on the key (cleanup after window expires)
+        redis_client.expire(key, RATE_LIMIT_WINDOW)
+
+        print(f"✅ Rate limit check passed for {user_id}: {count + 1}/{RATE_LIMIT_REQUESTS}")
+
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        # Redis error - log but don't block request
+        print(f"⚠️  Rate limit check failed for {user_id}: {e}")
+        # Continue without rate limiting on Redis errors
+
+def validate_url(url: str) -> bool:
+    """Validate URL format"""
+    return bool(re.match(r'^https?://[^\s]+$', url))
 
 # Define tools that accept servers parameter
 def delete_movie(movie_id: int, delete_files: bool, servers: dict) -> Dict[str, Any]:
@@ -327,7 +485,7 @@ def search_movies(query: str) -> Dict[str, Any]:
     try:
         search_url = "https://api.themoviedb.org/3/search/movie"
         params = {
-            "api_key": "eaba5719606a782018d06df21c4fe459",
+            "api_key": TMDB_API_KEY,
             "query": query
         }
         
@@ -350,7 +508,7 @@ def search_movies(query: str) -> Dict[str, Any]:
                 try:
                     credits_response = httpx.get(
                         f"https://api.themoviedb.org/3/movie/{item['id']}/credits",
-                        params={"api_key": "eaba5719606a782018d06df21c4fe459"},
+                        params={"api_key": TMDB_API_KEY},
                         timeout=3.0
                     )
                     if credits_response.status_code == 200:
@@ -385,7 +543,7 @@ def search_shows(query: str) -> Dict[str, Any]:
     try:
         search_url = "https://api.themoviedb.org/3/search/tv"
         params = {
-            "api_key": "eaba5719606a782018d06df21c4fe459",
+            "api_key": TMDB_API_KEY,
             "query": query
         }
         
@@ -426,7 +584,7 @@ def search_person(query: str) -> Dict[str, Any]:
     try:
         search_url = "https://api.themoviedb.org/3/search/person"
         params = {
-            "api_key": "eaba5719606a782018d06df21c4fe459",
+            "api_key": TMDB_API_KEY,
             "query": query,
             "include_adult": False
         }
@@ -461,7 +619,7 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
     try:
         credits_url = f"https://api.themoviedb.org/3/person/{person_id}/combined_credits"
         params = {
-            "api_key": "eaba5719606a782018d06df21c4fe459"
+            "api_key": TMDB_API_KEY
         }
 
         response = httpx.get(credits_url, params=params, timeout=5.0)
@@ -527,8 +685,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
     
     # Enrich items with fresh TMDB data
     processed_items = []
-    tmdb_api_key = "eaba5719606a782018d06df21c4fe459"
-    
+
     for item in items:
         # Just need the basics from AI
         tmdb_id = item.get("tmdb_id")
@@ -545,7 +702,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
             
             response = httpx.get(
                 tmdb_url,
-                params={"api_key": tmdb_api_key},
+                params={"api_key": TMDB_API_KEY},
                 timeout=5.0
             )
             
@@ -813,8 +970,19 @@ def execute_function(function_name: str, arguments: dict, servers: dict) -> dict
         return {"error": str(e)}
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    user_id: str = Depends(verify_mega_subscription)
+):
+    # Apply rate limiting
+    await check_rate_limit(user_id)
+
     try:
+        # FAST TEST MODE: Skip OpenAI for rate limit testing
+        if "test call" in request.message.lower():
+            logger.info(f"⚡ FAST TEST MODE: Returning immediately for '{request.message}'")
+            return {"response": f"Test response for: {request.message}"}
+
         # Special test case - bypass AI and return mock Nolan data
         if request.message.strip().lower() == "testing123" and request.context == "discover":
             print("🧪 TEST MODE: Creating mock Christopher Nolan stage")
@@ -926,16 +1094,30 @@ async def chat(request: ChatRequest):
                 return {"response": output_text}
 
         # Max iterations reached
-        raise HTTPException(status_code=500, detail="Max iterations reached without completion")
+        print(f"⚠️ Max iterations reached for user {user_id}")
+        raise HTTPException(status_code=500, detail="Request processing took too long. Please try a simpler query.")
 
+    except HTTPException:
+        # Re-raise HTTP exceptions (auth, rate limit, etc.)
+        raise
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        # Log error but don't expose details to client
+        print(f"❌ Error processing request for user {user_id}: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred processing your request. Please try again.")
 
 @app.get("/")
 async def root():
     return {"status": "Z Assistant with Tools Running 🚀"}
+
+@app.get("/health")
+async def health():
+    """Health check endpoint with Redis status"""
+    redis_status = "connected" if redis_client is not None else "disabled"
+    return {
+        "status": "healthy",
+        "redis": redis_status,
+        "rate_limiting": "enabled" if redis_client is not None else "disabled"
+    }
 
 @app.get("/staged/{stage_id}")
 async def get_staged_operation(stage_id: str):

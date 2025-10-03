@@ -6,3 +6,4 @@ __pycache__/
 .DS_Store
 *.sql
 *.py
+UPSTASH_SETUP.md

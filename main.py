@@ -785,8 +785,8 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
         }
 
 # Helper function to create tools with servers injected
-# System prompt for the assistant
-SYSTEM_PROMPT = """You are Z, a media server assistant. Use tools to get real data.
+# System prompt for DISCOVER view
+DISCOVER_PROMPT = """You are Z, a media discovery assistant. Find movies and TV shows, then stage them for display.
 
 IMPORTANT: Be smart and decisive. When users ask for something obvious, don't overthink it:
 - "The Matrix" = The Matrix (1999), not the sequels
@@ -794,76 +794,85 @@ IMPORTANT: Be smart and decisive. When users ask for something obvious, don't ov
 - "The Godfather" = The Godfather (1972), not Part II
 - For any movie series, assume they mean the FIRST/ORIGINAL movie unless they specify otherwise
 
-COMPLEX REQUESTS:
+LIBRARY AWARENESS:
+- You can check what's already in the user's library with get_all_movies and get_all_shows
+- If user asks for things they "don't have" or "missing from library", check their library first
+- Filter out titles they already own before staging results
 
-For ACTOR queries (like "Leonardo DiCaprio movies" or "films with Tom Hanks"):
+WORKFLOW:
+
+FOR ACTOR QUERIES (like "Leonardo DiCaprio movies" or "films with Tom Hanks"):
 1. Use search_person to find the actor and get their TMDB person_id
 2. Use get_person_credits with that person_id to get their COMPLETE filmography
-3. Filter by year, rating (vote_average), or other criteria as requested
-4. This gives you VERIFIED, COMPLETE results directly from TMDB
+3. Filter results by year, rating (vote_average), or other criteria as requested
+4. If user wants items "not in library", call get_all_movies/get_all_shows to filter
+5. Build items array from filtered results: items=[{{"tmdb_id": 577922, "media_type": "movie"}}, ...]
+6. Call add_to_stage(operation="discover", items=<the array>)
+7. Return ONLY the stage_id
 
-For DIRECTOR queries (like "Christopher Nolan movies"):
-1. Search for individual movie titles you know (Following, Memento, etc.)
-2. Use director information from search results to verify
-3. Christopher Nolan has: Following (1998), Memento (2000), Insomnia (2002), Batman Begins (2005), The Dark Knight (2008), The Prestige (2006), Inception (2010), The Dark Knight Rises (2012), Interstellar (2014), Dunkirk (2017), Tenet (2020), Oppenheimer (2023)
-4. Be COMPREHENSIVE - find ALL their works, not just 5-6
-
-For OTHER queries (like "sci-fi from the 90s"):
-1. Use web_search to get comprehensive lists
-2. Then search TMDB for each title to verify and get IDs
-
-For TV shows:
-- Always add just Season 1 (pilot season) by default unless the user specifies otherwise
-- "Add The Office" = Add Season 1 only
-- "Add all of The Office" or "Add The Office complete series" = Add all seasons
-
-SEARCHING AND STAGING:
-When users want to find media:
-1. Use search_movies or search_shows to find options
-2. Pick the most relevant results from the search
-3. Use add_to_stage to stage them for the UI
-4. For ambiguous searches, include multiple relevant results
-
-DISCOVER VIEW REQUESTS - CRITICAL WORKFLOW:
-If the message contains "[CONTEXT: DISCOVER VIEW]":
-
-FOR ACTOR QUERIES (like "movies with Leonardo DiCaprio in 2025"):
-1. Use search_person("Leonardo DiCaprio") to get person_id
-2. Use get_person_credits(person_id) to get ALL their movies/shows
-3. Filter results by year, rating, or other criteria
-4. Build items array from filtered results: items=[{{"tmdb_id": 577922, "media_type": "movie"}}, ...]
-5. Call add_to_stage(operation="discover", items=<the array>)
-6. Return ONLY the stage_id
-
-FOR DIRECTOR/TITLE QUERIES (like "Christopher Nolan movies"):
+FOR DIRECTOR QUERIES (like "Christopher Nolan movies"):
 1. Search for 10-20 movies/shows using search_movies or search_shows tools
    - Search results include director information - USE IT to filter!
    - If user asks for "Christopher Nolan movies", ONLY include results where director="Christopher Nolan"
-   - Don't just match by title - verify the director matches what user requested
-2. After ALL searches complete, manually build the items array from the results:
-   - Take the tmdb_id from EACH search result that matches the criteria
-   - Create this exact format: items=[{{"tmdb_id": 577922, "media_type": "movie"}}, {{"tmdb_id": 614911, "media_type": "movie"}}, ...]
-3. Call add_to_stage(operation="discover", items=<the array you built>)
+2. After ALL searches complete, manually build the items array from the results
+3. Call add_to_stage(operation="discover", items=<the array>)
 4. Return ONLY the stage_id
 
-EXAMPLE - If search_movies("Tenet") returned tmdb_id: 577922, director: "Christopher Nolan":
-  Call: add_to_stage(operation="discover", items=[{{"tmdb_id": 577922, "media_type": "movie"}}])
+FOR OTHER QUERIES (like "sci-fi from the 90s"):
+1. Use web_search to get comprehensive lists
+2. Then search TMDB for each title to verify and get IDs
+3. Build items array and call add_to_stage
+4. Return ONLY the stage_id
 
 YOU MUST PASS THE ITEMS PARAMETER - NEVER call add_to_stage with only operation!
+ALWAYS return ONLY the stage_id, nothing else."""
 
-When asked to delete media:
-1. First search for it in the library to get the ID
-2. Delete with files by default unless user says otherwise
-3. Report what was deleted
+# System prompt for CHAT assistant
+CHAT_PROMPT = """You are Z, a friendly media library assistant. Help users manage their Radarr and Sonarr libraries.
 
-Never make up data - always use tools to get real information. But DO use your knowledge to be thorough!"""
+THRESHOLD RULE - CRITICAL:
+- 1-3 items: Execute directly using add_movie_to_radarr, delete_movie, etc.
+- 4+ items: MUST use add_to_stage for user confirmation
+  - operation="add" for adding media (green badge in UI)
+  - operation="remove" for deleting media (red badge in UI)
+  - operation="update" for modifying media (blue badge in UI)
+
+EXAMPLES:
+User: "Add The Matrix"
+→ Direct: Use add_movie_to_radarr (1 item)
+
+User: "Add Inception, Tenet, and Interstellar"
+→ Direct: Use add_movie_to_radarr for each (3 items)
+
+User: "Add all Christopher Nolan movies"
+→ Stage: Search for all titles → call add_to_stage(operation="add", items=[...]) → return stage_id
+
+User: "Delete all movies under 5.0 rating"
+→ Stage: Get library → filter → call add_to_stage(operation="remove", items=[...]) → return stage_id
+
+CAPABILITIES:
+- Check library statistics
+- Search library for specific titles
+- Add/delete/update movies in Radarr
+- Answer questions about media collection
+
+For TV shows:
+- Always add Season 1 by default unless user specifies otherwise
+
+When staging (4+ items):
+1. Search/filter to get the items
+2. Build items array with tmdb_id and media_type
+3. Call add_to_stage with appropriate operation
+4. Return ONLY the stage_id
+
+Never make up data - always use tools to get real information."""
 
 
-# Define tools in Responses API format
-def get_tool_definitions():
-    """Returns tool definitions in Responses API format"""
+# Tool definitions for DISCOVER view
+def get_discover_tools():
+    """Returns tools for discover/search functionality"""
     return [
-        {"type": "web_search"},  # Built-in web search tool
+        {"type": "web_search"},
         {
             "type": "function",
             "name": "search_movies",
@@ -922,6 +931,28 @@ def get_tool_definitions():
         },
         {
             "type": "function",
+            "name": "get_all_movies",
+            "description": "Get all movies in user's library to filter out what they already have",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_all_shows",
+            "description": "Get all TV shows in user's library to filter out what they already have",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
             "name": "add_to_stage",
             "description": "Stage items for display in UI. MUST include items array.",
             "parameters": {
@@ -949,11 +980,150 @@ def get_tool_definitions():
         }
     ]
 
+# Tool definitions for CHAT assistant
+def get_chat_tools():
+    """Returns tools for library management chat"""
+    return [
+        {
+            "type": "function",
+            "name": "get_library_stats",
+            "description": "Get statistics about the user's media library (movie and show counts)",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_all_movies",
+            "description": "Get all movies in user's library with TMDB IDs for bulk operations",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_all_shows",
+            "description": "Get all TV shows in user's library for bulk operations",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "search_movies_in_library",
+            "description": "Search for movies already in the user's library",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Movie title to search for"}
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "add_movie_to_radarr",
+            "description": "Add a single movie to Radarr (for 1-3 items only)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tmdb_id": {"type": "integer", "description": "TMDB ID of the movie"},
+                    "title": {"type": "string", "description": "Title of the movie"}
+                },
+                "required": ["tmdb_id", "title"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "delete_movie",
+            "description": "Delete a single movie from Radarr (for 1-3 items only)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "movie_id": {"type": "integer", "description": "Radarr movie ID"},
+                    "delete_files": {"type": "boolean", "description": "Whether to delete files"}
+                },
+                "required": ["movie_id", "delete_files"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "search_movies",
+            "description": "Search for movies on TMDB to get their ID",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Movie title to search for"}
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "search_shows",
+            "description": "Search for TV shows on TMDB to get their ID",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "TV show title to search for"}
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "add_to_stage",
+            "description": "Stage 4+ items for user confirmation. MUST include items array.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "enum": ["add", "remove", "update"], "description": "Operation type: add (green), remove (red), update (blue)"},
+                    "items": {
+                        "type": "array",
+                        "description": "Array of items with tmdb_id and media_type",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tmdb_id": {"type": "integer"},
+                                "media_type": {"type": "string", "enum": ["movie", "tv"]}
+                            },
+                            "required": ["tmdb_id", "media_type"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["operation", "items"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    ]
+
 
 # Function dispatcher
-def execute_function(function_name: str, arguments: dict, servers: dict) -> dict:
+def execute_function(function_name: str, arguments: dict, servers: dict, user_id: str = None) -> dict:
     """Execute a function call and return the result"""
     try:
+        # Discover tools
         if function_name == "search_movies":
             return search_movies(arguments["query"])
         elif function_name == "search_shows":
@@ -963,70 +1133,38 @@ def execute_function(function_name: str, arguments: dict, servers: dict) -> dict
         elif function_name == "get_person_credits":
             return get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
-            return add_to_stage(arguments["operation"], arguments["items"])
+            return add_to_stage(arguments["operation"], arguments["items"], user_id)
+        # Chat tools
+        elif function_name == "get_library_stats":
+            return get_library_stats(servers)
+        elif function_name == "get_all_movies":
+            return get_all_movies(servers)
+        elif function_name == "get_all_shows":
+            return get_all_shows(servers)
+        elif function_name == "search_movies_in_library":
+            return search_movies_in_library(arguments["query"], servers)
+        elif function_name == "add_movie_to_radarr":
+            return add_movie_to_radarr(arguments["tmdb_id"], arguments["title"], servers)
+        elif function_name == "delete_movie":
+            return delete_movie(arguments["movie_id"], arguments["delete_files"], servers)
         else:
             return {"error": f"Unknown function: {function_name}"}
     except Exception as e:
         return {"error": str(e)}
 
-@app.post("/chat")
-async def chat(
+@app.post("/discover")
+async def discover(
     request: ChatRequest,
     user_id: str = Depends(verify_mega_subscription)
 ):
-    # Apply rate limiting
+    """Discover endpoint - search for media and return stage_id"""
     await check_rate_limit(user_id)
 
     try:
-        # FAST TEST MODE: Skip OpenAI for rate limit testing
-        if "test call" in request.message.lower():
-            logger.info(f"⚡ FAST TEST MODE: Returning immediately for '{request.message}'")
-            return {"response": f"Test response for: {request.message}"}
+        print(f"🔍 DISCOVER: {request.message}")
 
-        # Special test case - bypass AI and return mock Nolan data
-        if request.message.strip().lower() == "testing123" and request.context == "discover":
-            print("🧪 TEST MODE: Creating mock Christopher Nolan stage")
-
-            # Christopher Nolan filmography
-            nolan_movies = [
-                {"tmdb_id": 77, "media_type": "movie"},      # Memento
-                {"tmdb_id": 155, "media_type": "movie"},     # The Dark Knight
-                {"tmdb_id": 1124, "media_type": "movie"},    # The Prestige
-                {"tmdb_id": 27205, "media_type": "movie"},   # Inception
-                {"tmdb_id": 49026, "media_type": "movie"},   # The Dark Knight Rises
-                {"tmdb_id": 157336, "media_type": "movie"},  # Interstellar
-                {"tmdb_id": 324857, "media_type": "movie"},  # Spider (JK - Dunkirk)
-                {"tmdb_id": 324857, "media_type": "movie"},  # Dunkirk
-                {"tmdb_id": 475557, "media_type": "movie"},  # Joker (JK - actually Tenet)
-                {"tmdb_id": 577922, "media_type": "movie"},  # Tenet
-                {"tmdb_id": 872585, "media_type": "movie"},  # Oppenheimer
-                {"tmdb_id": 272, "media_type": "movie"},     # Batman Begins
-                {"tmdb_id": 496, "media_type": "movie"},     # Following
-                {"tmdb_id": 320, "media_type": "movie"},     # Insomnia
-            ]
-
-            # Create staged operation
-            result = add_to_stage("discover", nolan_movies)
-            stage_id = result.get("stage_id")
-
-            print(f"🎯 Test stage created: {stage_id}")
-            return {"response": stage_id, "stage_id": stage_id}
-
-        # Prepare input message
-        input_message = request.message
-        if request.context == "discover":
-            input_message = f"[CONTEXT: DISCOVER VIEW] {request.message}"
-            print(f"🎨 Discover context detected - AI will stage results for visual display")
-
-        # Prepare instructions with system prompt
-        input_messages = [
-            {"role": "user", "content": input_message}
-        ]
-
-        # Get tool definitions
-        tools = get_tool_definitions()
-
-        # Agent loop - call responses.create until no more tool calls
+        input_messages = [{"role": "user", "content": request.message}]
+        tools = get_discover_tools()
         max_iterations = 25
         iteration = 0
 
@@ -1034,15 +1172,13 @@ async def chat(
             iteration += 1
             print(f"\n🔄 Iteration {iteration}")
 
-            # Call Responses API
             response = openai_client.responses.create(
                 model="gpt-5-mini",
-                instructions=SYSTEM_PROMPT,
+                instructions=DISCOVER_PROMPT,
                 input=input_messages,
                 tools=tools,
             )
 
-            # Check for function calls in output
             has_function_calls = False
             for item in response.output:
                 if item.type == "function_call":
@@ -1051,12 +1187,10 @@ async def chat(
                     arguments = json.loads(item.arguments)
                     call_id = item.call_id
 
-                    print(f"  🔧 Calling: {function_name} with {arguments}")
+                    print(f"  🔧 {function_name}({arguments})")
 
-                    # Execute the function
-                    result = execute_function(function_name, arguments, request.servers)
+                    result = execute_function(function_name, arguments, request.servers, user_id)
 
-                    # Append function call to history
                     input_messages.append({
                         "type": "function_call",
                         "call_id": call_id,
@@ -1064,18 +1198,15 @@ async def chat(
                         "arguments": item.arguments
                     })
 
-                    # Append function result
                     input_messages.append({
                         "type": "function_call_output",
                         "call_id": call_id,
                         "output": json.dumps(result)
                     })
 
-                    print(f"  ✅ Result: {json.dumps(result)[:100]}...")
+                    print(f"  ✅ {json.dumps(result)[:100]}...")
 
-            # If no function calls, we have the final response
             if not has_function_calls:
-                # Extract text from message output
                 output_text = ""
                 for item in response.output:
                     if item.type == "message":
@@ -1085,25 +1216,98 @@ async def chat(
                                 break
                         break
 
-                # For discover context, extract stage_id
-                if request.context == "discover":
-                    stage_id = output_text.strip()
-                    print(f"🎯 Discover mode - stage_id: {stage_id}")
-                    return {"response": stage_id, "stage_id": stage_id}
+                stage_id = output_text.strip()
+                print(f"🎯 Returning stage_id: {stage_id}")
+                return {"response": stage_id, "stage_id": stage_id}
 
-                return {"response": output_text}
-
-        # Max iterations reached
-        print(f"⚠️ Max iterations reached for user {user_id}")
-        raise HTTPException(status_code=500, detail="Request processing took too long. Please try a simpler query.")
+        raise HTTPException(status_code=500, detail="Request took too long")
 
     except HTTPException:
-        # Re-raise HTTP exceptions (auth, rate limit, etc.)
         raise
     except Exception as e:
-        # Log error but don't expose details to client
-        print(f"❌ Error processing request for user {user_id}: {e}")
-        raise HTTPException(status_code=500, detail="An error occurred processing your request. Please try again.")
+        print(f"❌ Discover error: {e}")
+        raise HTTPException(status_code=500, detail="Search failed")
+
+@app.post("/chat")
+async def chat(
+    request: ChatRequest,
+    user_id: str = Depends(verify_mega_subscription)
+):
+    """Chat endpoint - conversational library assistant"""
+    await check_rate_limit(user_id)
+
+    try:
+        print(f"💬 CHAT: {request.message}")
+
+        input_messages = [{"role": "user", "content": request.message}]
+        tools = get_chat_tools()
+        max_iterations = 25
+        iteration = 0
+
+        while iteration < max_iterations:
+            iteration += 1
+            print(f"\n🔄 Iteration {iteration}")
+
+            response = openai_client.responses.create(
+                model="gpt-5-mini",
+                instructions=CHAT_PROMPT,
+                input=input_messages,
+                tools=tools,
+            )
+
+            has_function_calls = False
+            for item in response.output:
+                if item.type == "function_call":
+                    has_function_calls = True
+                    function_name = item.name
+                    arguments = json.loads(item.arguments)
+                    call_id = item.call_id
+
+                    print(f"  🔧 {function_name}({arguments})")
+
+                    result = execute_function(function_name, arguments, request.servers, user_id)
+
+                    input_messages.append({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": function_name,
+                        "arguments": item.arguments
+                    })
+
+                    input_messages.append({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": json.dumps(result)
+                    })
+
+                    print(f"  ✅ {json.dumps(result)[:100]}...")
+
+            if not has_function_calls:
+                output_text = ""
+                for item in response.output:
+                    if item.type == "message":
+                        for content in item.content:
+                            if hasattr(content, 'text'):
+                                output_text = content.text
+                                break
+                        break
+
+                # Check if this is a staged operation (stage_id returned)
+                # Stage IDs are UUIDs, so if response looks like one, treat as stage
+                if len(output_text) == 36 and output_text.count('-') == 4:
+                    print(f"📦 Staged operation: {output_text}")
+                    return {"response": output_text, "stage_id": output_text, "staged": True}
+
+                print(f"💬 Response: {output_text[:100]}...")
+                return {"response": output_text}
+
+        raise HTTPException(status_code=500, detail="Request took too long")
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Chat error: {e}")
+        raise HTTPException(status_code=500, detail="Chat failed")
 
 @app.get("/")
 async def root():

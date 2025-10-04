@@ -14,6 +14,9 @@ import re
 import time
 import logging
 from upstash_redis import Redis
+import hashlib
+import hmac
+import base64
 
 # Configure logging
 logging.basicConfig(
@@ -131,6 +134,82 @@ async def verify_mega_subscription(authorization: str = Header(None)) -> str:
     except Exception as e:
         print(f"Auth error: {e}")
         raise HTTPException(status_code=401, detail="Authentication failed")
+
+# Device-based authentication with HMAC
+async def verify_device_subscription(x_device_id: str = Header(None)) -> tuple[str, str]:
+    """Verify device has active Mega subscription and return (device_id, hmac_key)"""
+    if not x_device_id:
+        raise HTTPException(status_code=401, detail="X-Device-Id header required")
+
+    try:
+        # Validate UUID format
+        device_uuid = uuid.UUID(x_device_id)
+        device_id = str(device_uuid)
+
+        # Look up device in database
+        result = supabase.table('device_keys').select('hmac_key').eq('device_id', device_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=403, detail="Device not registered. Please update the app.")
+
+        hmac_key = result.data[0]['hmac_key']
+
+        # Update last_used timestamp
+        supabase.table('device_keys').update({
+            'last_used': datetime.now().isoformat()
+        }).eq('device_id', device_id).execute()
+
+        return device_id, hmac_key
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid device ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Device auth error: {e}")
+        raise HTTPException(status_code=401, detail="Device authentication failed")
+
+def decrypt_credentials(encrypted_data: dict, hmac_key: str) -> dict:
+    """Decrypt HMAC-protected credentials"""
+    decrypted = {}
+
+    for service, encrypted in encrypted_data.items():
+        try:
+            # Split the encrypted data and HMAC
+            parts = encrypted.split('::')
+            if len(parts) != 2:
+                logger.warning(f"Invalid encrypted format for {service}")
+                continue
+
+            xor_encrypted, signature = parts
+
+            # Verify HMAC
+            expected_hmac = hmac.new(
+                hmac_key.encode(),
+                xor_encrypted.encode(),
+                hashlib.sha256
+            ).hexdigest()
+
+            if signature != expected_hmac:
+                logger.warning(f"HMAC verification failed for {service}")
+                continue
+
+            # Decrypt XOR
+            encrypted_bytes = base64.b64decode(xor_encrypted)
+            key_bytes = hmac_key.encode()
+            decrypted_bytes = bytes([
+                encrypted_bytes[i] ^ key_bytes[i % len(key_bytes)]
+                for i in range(len(encrypted_bytes))
+            ])
+
+            # Parse JSON
+            decrypted[service] = json.loads(decrypted_bytes.decode())
+
+        except Exception as e:
+            logger.error(f"Failed to decrypt {service}: {e}")
+            continue
+
+    return decrypted
 
 async def check_rate_limit(user_id: str):
     """Check and enforce rate limits per user using Upstash Redis"""
@@ -681,7 +760,7 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
         return {"movies": [], "shows": [], "error": str(e)}
 
 # Function for Responses API
-def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict[str, Any]:
+def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Dict[str, Any]:
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
@@ -758,7 +837,7 @@ def add_to_stage(operation: str, items: List[Dict], user_id: str = None) -> Dict
             "operation": operation,
             "items": processed_items,
             "status": "pending",
-            "user_id": user_id
+            "device_id": device_id  # Store device_id instead of user_id
         }
         
         result = supabase.table("staged_operations").insert(data).execute()
@@ -1122,7 +1201,7 @@ def get_chat_tools():
 
 
 # Function dispatcher
-def execute_function(function_name: str, arguments: dict, servers: dict, user_id: str = None) -> dict:
+def execute_function(function_name: str, arguments: dict, servers: dict, device_id: str = None) -> dict:
     """Execute a function call and return the result"""
     try:
         # Discover tools
@@ -1135,7 +1214,7 @@ def execute_function(function_name: str, arguments: dict, servers: dict, user_id
         elif function_name == "get_person_credits":
             return get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
-            return add_to_stage(arguments["operation"], arguments["items"], user_id)
+            return add_to_stage(arguments["operation"], arguments["items"], device_id)
         # Chat tools
         elif function_name == "get_library_stats":
             return get_library_stats(servers)
@@ -1157,10 +1236,11 @@ def execute_function(function_name: str, arguments: dict, servers: dict, user_id
 @app.post("/discover")
 async def discover(
     request: ChatRequest,
-    user_id: str = Depends(verify_mega_subscription)
+    device_auth: tuple[str, str] = Depends(verify_device_subscription)
 ):
     """Discover endpoint - search for media and return stage_id"""
-    await check_rate_limit(user_id)
+    device_id, hmac_key = device_auth
+    await check_rate_limit(device_id)
 
     try:
         print(f"🔍 DISCOVER: {request.message}")
@@ -1191,7 +1271,7 @@ async def discover(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, request.servers, user_id)
+                    result = execute_function(function_name, arguments, request.servers, device_id)
 
                     input_messages.append({
                         "type": "function_call",
@@ -1230,16 +1310,67 @@ async def discover(
         print(f"❌ Discover error: {e}")
         raise HTTPException(status_code=500, detail="Search failed")
 
+class DeviceRegisterRequest(BaseModel):
+    device_id: str
+    hmac_key: str
+
+@app.post("/device/register")
+async def register_device(request: DeviceRegisterRequest):
+    """Register a new device with its HMAC key"""
+    try:
+        # Validate UUID format
+        device_uuid = uuid.UUID(request.device_id)
+        device_id = str(device_uuid)
+
+        # Check if device already exists
+        existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()
+
+        if existing.data:
+            # Update existing device's HMAC key
+            supabase.table('device_keys').update({
+                'hmac_key': request.hmac_key,
+                'last_used': datetime.now().isoformat()
+            }).eq('device_id', device_id).execute()
+
+            logger.info(f"🔄 Updated HMAC key for device {device_id[:8]}...")
+        else:
+            # Register new device
+            supabase.table('device_keys').insert({
+                'device_id': device_id,
+                'hmac_key': request.hmac_key,
+                'created_at': datetime.now().isoformat(),
+                'last_used': datetime.now().isoformat(),
+                'request_count': 0
+            }).execute()
+
+            logger.info(f"✅ Registered new device {device_id[:8]}...")
+
+        return {"status": "registered", "device_id": device_id}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid device ID format")
+    except Exception as e:
+        logger.error(f"Device registration error: {e}")
+        raise HTTPException(status_code=500, detail="Registration failed")
+
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
-    user_id: str = Depends(verify_mega_subscription)
+    device_auth: tuple[str, str] = Depends(verify_device_subscription)
 ):
-    """Chat endpoint - conversational library assistant"""
-    await check_rate_limit(user_id)
+    """Chat endpoint - conversational library assistant with HMAC encryption"""
+    device_id, hmac_key = device_auth
+    await check_rate_limit(device_id)
 
     try:
-        print(f"💬 CHAT: {request.message}")
+        print(f"💬 CHAT: {request.message} (device: {device_id[:8]}...)")
+
+        # Decrypt credentials if encrypted
+        servers = request.servers
+        if servers and isinstance(next(iter(servers.values()), None), str):
+            # Credentials are encrypted - decrypt them
+            servers = decrypt_credentials(servers, hmac_key)
+            print(f"🔐 Decrypted credentials for {list(servers.keys())}")
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_chat_tools()
@@ -1267,7 +1398,7 @@ async def chat(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, request.servers, user_id)
+                    result = execute_function(function_name, arguments, servers, device_id)
 
                     input_messages.append({
                         "type": "function_call",

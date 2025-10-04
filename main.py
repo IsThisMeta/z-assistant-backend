@@ -1243,7 +1243,14 @@ async def discover(
     await check_rate_limit(device_id)
 
     try:
-        print(f"🔍 DISCOVER: {request.message}")
+        print(f"🔍 DISCOVER: {request.message} (device: {device_id[:8]}...)")
+
+        # Decrypt credentials if encrypted - CRITICAL FIX!
+        servers = request.servers
+        if servers and isinstance(next(iter(servers.values()), None), str):
+            # Credentials are encrypted - decrypt them
+            servers = decrypt_credentials(servers, hmac_key)
+            print(f"🔐 Decrypted credentials for {list(servers.keys())}")
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_discover_tools()
@@ -1271,7 +1278,7 @@ async def discover(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, request.servers, device_id)
+                    result = execute_function(function_name, arguments, servers, device_id)  # Use decrypted servers!
 
                     input_messages.append({
                         "type": "function_call",
@@ -1315,8 +1322,11 @@ class DeviceRegisterRequest(BaseModel):
     hmac_key: str
 
 @app.post("/device/register")
-async def register_device(request: DeviceRegisterRequest):
-    """Register a new device with its HMAC key"""
+async def register_device(
+    request: DeviceRegisterRequest,
+    user_id: str = Depends(verify_mega_subscription)  # REQUIRE MEGA SUBSCRIPTION TO REGISTER!
+):
+    """Register a new device with its HMAC key - requires active Mega subscription"""
     try:
         # Validate UUID format
         device_uuid = uuid.UUID(request.device_id)

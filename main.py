@@ -114,12 +114,14 @@ async def verify_mega_subscription(authorization: str = Header(None)) -> str:
         user_id = user.id
 
         # Check if user has active Mega subscription using RPC
+        # Clean 1.2: Function always returns boolean, no NULL handling needed
         result = supabase.rpc('has_active_mega', params={'p_user_id': user_id}).execute()
+        has_mega = bool(result.data)
 
-        if not result.data:
+        if not has_mega:
             raise HTTPException(
                 status_code=403,
-                detail="Zagreus Mega subscription required. Upgrade in Settings > Subscriptions."
+                detail="Zagreus Mega subscription required. Upgrade in Settings > Subscriptions.",
             )
 
         return user_id

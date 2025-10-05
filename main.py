@@ -337,6 +337,59 @@ def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
 # Removed search_media - dead code that violated zero-knowledge architecture
 
 # Function for Responses API
+def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
+    """Request episode details for a show from device - ZERO-KNOWLEDGE on-demand fetch!"""
+    print(f"🔧 TOOL CALLED: get_show_episodes - Show: {show_title} (device: {device_id[:8]}...)")
+
+    try:
+        # Generate unique request ID
+        request_id = str(uuid.uuid4())
+
+        # Stage fetch command for device to pick up
+        print(f"  → Staging episode fetch request: {request_id}")
+        supabase.table('data_fetch_commands').insert({
+            'request_id': request_id,
+            'device_id': device_id,
+            'action': 'fetch_episodes',
+            'show_title': show_title,
+            'status': 'pending',
+            'created_at': datetime.now().isoformat()
+        }).execute()
+
+        # Wait for device to complete fetch (3x5s retry pattern)
+        max_retries = 3
+        retry_delay = 5
+
+        for attempt in range(max_retries):
+            time.sleep(retry_delay)
+
+            # Check command status
+            cmd_result = supabase.table('data_fetch_commands').select('status').eq('request_id', request_id).execute()
+
+            if cmd_result.data and cmd_result.data[0]['status'] == 'completed':
+                # Device completed - read episode cache
+                print(f"  ✓ Device completed fetch, reading episode cache...")
+                cache_result = supabase.table('episode_cache').select('episodes').eq('device_id', device_id).eq('show_title', show_title).execute()
+
+                if cache_result.data:
+                    episodes = cache_result.data[0]['episodes']
+                    print(f"  ✓ Retrieved {len(episodes)} episodes for {show_title}")
+                    return {"episodes": episodes, "show_title": show_title}
+                else:
+                    return {"error": f"No episode data found for {show_title}"}
+
+            if attempt < max_retries - 1:
+                print(f"  → Waiting for device response... retry {attempt + 2}/{max_retries}")
+
+        # Timeout
+        print(f"  ✗ Device did not respond in time")
+        return {"error": "Request timed out - device may be offline or busy"}
+
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+        return {"error": str(e)}
+
+# Function for Responses API
 def get_all_shows(device_id: str) -> Dict[str, Any]:
     """Get list of all TV shows in the library from Supabase cache"""
     print(f"🔧 TOOL CALLED: get_all_shows (device: {device_id[:8]}...)")
@@ -1094,6 +1147,20 @@ def get_chat_tools():
         },
         {
             "type": "function",
+            "name": "get_show_episodes",
+            "description": "Get detailed episode list for a TV show including which episodes you have. Requests episode data from device in real-time.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "show_title": {"type": "string", "description": "Title of the TV show to get episodes for"}
+                },
+                "required": ["show_title"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
             "name": "search_movies",
             "description": "Search for movies on TMDB to get their ID",
             "parameters": {
@@ -1172,6 +1239,8 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
             return get_all_movies(device_id)
         elif function_name == "get_all_shows":
             return get_all_shows(device_id)
+        elif function_name == "get_show_episodes":
+            return get_show_episodes(arguments["show_title"], device_id)
         elif function_name == "search_movies_in_library":
             return search_movies_in_library(arguments["query"], device_id)
         elif function_name == "add_to_queue":

@@ -280,44 +280,55 @@ def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: search_movies_in_library - Query: {query} (device: {device_id[:8]}...)")
 
     try:
-        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
-        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
+        # Retry up to 3 times if sync is in progress
+        max_retries = 3
+        retry_delay = 5  # seconds
 
-        if not result.data:
-            print("  → No cache found - library may be syncing for first time")
-            return {
-                "message": "Library is being synced for the first time. Please wait a moment and try again."
-            }
+        for attempt in range(max_retries):
+            # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+            result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        cache = result.data[0]
+            if not result.data:
+                print("  → No cache found - library may be syncing for first time")
+                if attempt < max_retries - 1:
+                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                return {"error": "Library not synced yet. Please try again later."}
 
-        # Check if sync is in progress
-        if cache.get('is_syncing'):
-            print("  → Sync in progress")
-            return {
-                "message": "Library is currently syncing. Please wait a moment and try again."
-            }
+            cache = result.data[0]
 
-        all_movies = cache.get('movies', [])
-        query_lower = query.lower()
+            # Check if sync is in progress
+            if cache.get('is_syncing'):
+                if attempt < max_retries - 1:
+                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("  ✗ Sync still in progress after 3 retries")
+                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
 
-        # Search for matches
-        matches = []
-        for movie in all_movies:
-            if query_lower in movie.get("title", "").lower():
-                matches.append({
-                    "title": movie["title"],
-                    "year": movie.get("year"),
-                    "has_file": movie.get("has_file", False),
-                    "tmdb_id": movie.get("tmdb_id"),
-                    "quality": movie.get("quality")
-                })
+            # Sync complete - search for matches
+            all_movies = cache.get('movies', [])
+            query_lower = query.lower()
 
-        if not matches:
-            return {"matches": [], "message": f"No movies found matching '{query}'"}
+            # Search for matches
+            matches = []
+            for movie in all_movies:
+                if query_lower in movie.get("title", "").lower():
+                    matches.append({
+                        "title": movie["title"],
+                        "year": movie.get("year"),
+                        "has_file": movie.get("has_file", False),
+                        "tmdb_id": movie.get("tmdb_id"),
+                        "quality": movie.get("quality")
+                    })
 
-        print(f"  ✓ Found {len(matches)} matches")
-        return {"matches": matches[:10]}  # Limit to 10 results
+            if not matches:
+                return {"matches": [], "message": f"No movies found matching '{query}'"}
+
+            print(f"  ✓ Found {len(matches)} matches")
+            return {"matches": matches[:10]}  # Limit to 10 results
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -330,39 +341,51 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
     """Get list of all TV shows in the library from Supabase cache"""
     print(f"🔧 TOOL CALLED: get_all_shows (device: {device_id[:8]}...)")
     try:
-        # Read from Supabase library_cache
-        result = supabase.table('library_cache').select('shows, synced_at, is_syncing').eq('device_id', device_id).execute()
+        # Retry up to 3 times if sync is in progress
+        max_retries = 3
+        retry_delay = 5  # seconds
 
-        if not result.data:
-            print("  → No cache found - library may be syncing for first time")
-            return {
-                "message": "Library is being synced for the first time. Please wait a moment and try again."
-            }
+        for attempt in range(max_retries):
+            # Read from Supabase library_cache
+            result = supabase.table('library_cache').select('shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        cache = result.data[0]
+            if not result.data:
+                print("  → No cache found - library may be syncing for first time")
+                if attempt < max_retries - 1:
+                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                return {"error": "Library not synced yet. Please try again later."}
 
-        # Check if sync is in progress
-        if cache.get('is_syncing'):
-            print("  → Sync in progress")
-            return {
-                "message": "Library is currently syncing. Please wait a moment and try again."
-            }
+            cache = result.data[0]
 
-        synced_at = datetime.fromisoformat(cache['synced_at'])
-        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+            # Check if sync is in progress
+            if cache.get('is_syncing'):
+                if attempt < max_retries - 1:
+                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("  ✗ Sync still in progress after 3 retries")
+                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
 
-        # Check if cache is stale (> 24 hours)
-        if age_hours > 24:
-            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
-            return {
-                "error": "Library cache is stale. Syncing...",
-                "requires_sync": True
-            }
+            # Sync complete - return shows
+            synced_at = datetime.fromisoformat(cache['synced_at'])
+            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
-        shows = cache.get('shows', [])
-        print(f"  ✓ Retrieved {len(shows[:10])} shows from cache (showing first 10 of {len(shows)} total, synced {age_hours:.1f}h ago)")
+            # Check if cache is stale (> 24 hours)
+            if age_hours > 24:
+                print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+                return {
+                    "error": "Library cache is stale. Syncing...",
+                    "requires_sync": True
+                }
 
-        return {"shows": shows[:10], "total": len(shows)}
+            shows = cache.get('shows', [])
+            print(f"  ✓ Retrieved {len(shows[:10])} shows from cache (showing first 10 of {len(shows)} total, synced {age_hours:.1f}h ago)")
+
+            return {"shows": shows[:10], "total": len(shows)}
+
     except Exception as e:
         print(f"  ✗ Error: {e}")
         return {"error": str(e)}
@@ -373,45 +396,56 @@ def get_library_stats(device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: get_library_stats (device: {device_id[:8]}...)")
 
     try:
-        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
-        result = supabase.table('library_cache').select('movies, shows, synced_at, is_syncing').eq('device_id', device_id).execute()
+        # Retry up to 3 times if sync is in progress
+        max_retries = 3
+        retry_delay = 5  # seconds
 
-        if not result.data:
-            print("  → No cache found - library may be syncing for first time")
-            return {
-                "message": "Library is being synced for the first time. Please wait a moment and try again."
-            }
+        for attempt in range(max_retries):
+            # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+            result = supabase.table('library_cache').select('movies, shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        cache = result.data[0]
+            if not result.data:
+                print("  → No cache found - library may be syncing for first time")
+                if attempt < max_retries - 1:
+                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                return {"error": "Library not synced yet. Please try again later."}
 
-        # Check if sync is in progress
-        if cache.get('is_syncing'):
-            print("  → Sync in progress")
-            return {
-                "message": "Library is currently syncing. Please wait a moment and try again."
-            }
+            cache = result.data[0]
 
-        synced_at = datetime.fromisoformat(cache['synced_at'])
-        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+            # Check if sync is in progress
+            if cache.get('is_syncing'):
+                if attempt < max_retries - 1:
+                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("  ✗ Sync still in progress after 3 retries")
+                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
 
-        # Check if cache is stale (> 24 hours)
-        if age_hours > 24:
-            print(f"  ⚠️  Cache is {age_hours:.1f} hours old - requesting refresh")
+            # Sync complete - return stats
+            synced_at = datetime.fromisoformat(cache['synced_at'])
+            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+
+            # Check if cache is stale (> 24 hours)
+            if age_hours > 24:
+                print(f"  ⚠️  Cache is {age_hours:.1f} hours old - requesting refresh")
+                stats = {
+                    "movies": len(cache.get('movies', [])),
+                    "shows": len(cache.get('shows', [])),
+                    "cache_age_hours": round(age_hours, 1),
+                    "requires_sync": True
+                }
+                return stats
+
             stats = {
                 "movies": len(cache.get('movies', [])),
                 "shows": len(cache.get('shows', [])),
-                "cache_age_hours": round(age_hours, 1),
-                "requires_sync": True
+                "cache_age_hours": round(age_hours, 1)
             }
+            print(f"  ✓ {stats['movies']} movies, {stats['shows']} shows (cache age: {age_hours:.1f}h)")
             return stats
-
-        stats = {
-            "movies": len(cache.get('movies', [])),
-            "shows": len(cache.get('shows', [])),
-            "cache_age_hours": round(age_hours, 1)
-        }
-        print(f"  ✓ {stats['movies']} movies, {stats['shows']} shows (cache age: {age_hours:.1f}h)")
-        return stats
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -424,40 +458,51 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
     """Get list of all movies in the library from Supabase cache"""
     print(f"🔧 TOOL CALLED: get_all_movies (device: {device_id[:8]}...)")
     try:
-        # Read from Supabase library_cache
-        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
+        # Retry up to 3 times if sync is in progress
+        max_retries = 3
+        retry_delay = 5  # seconds
 
-        if not result.data:
-            print("  → No cache found - library may be syncing for first time")
-            return {
-                "message": "Library is being synced for the first time. Please wait a moment and try again."
-            }
+        for attempt in range(max_retries):
+            # Read from Supabase library_cache
+            result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        cache = result.data[0]
+            if not result.data:
+                print("  → No cache found - library may be syncing for first time")
+                if attempt < max_retries - 1:
+                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                return {"error": "Library not synced yet. Please try again later."}
 
-        # Check if sync is in progress
-        if cache.get('is_syncing'):
-            print("  → Sync in progress")
-            return {
-                "message": "Library is currently syncing. Please wait a moment and try again."
-            }
+            cache = result.data[0]
 
-        cache = result.data[0]
-        synced_at = datetime.fromisoformat(cache['synced_at'])
-        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+            # Check if sync is in progress
+            if cache.get('is_syncing'):
+                if attempt < max_retries - 1:
+                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print("  ✗ Sync still in progress after 3 retries")
+                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
 
-        # Check if cache is stale (> 24 hours)
-        if age_hours > 24:
-            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
-            return {
-                "error": "Library cache is stale. Syncing...",
-                "requires_sync": True
-            }
+            # Sync complete - return movies
+            synced_at = datetime.fromisoformat(cache['synced_at'])
+            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
-        movies = cache.get('movies', [])
-        print(f"  ✓ Retrieved {len(movies[:20])} movies from cache (showing first 20 of {len(movies)} total, synced {age_hours:.1f}h ago)")
+            # Check if cache is stale (> 24 hours)
+            if age_hours > 24:
+                print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+                return {
+                    "error": "Library cache is stale. Syncing...",
+                    "requires_sync": True
+                }
 
-        return {"movies": movies[:20], "total": len(movies)}
+            movies = cache.get('movies', [])
+            print(f"  ✓ Retrieved {len(movies[:20])} movies from cache (showing first 20 of {len(movies)} total, synced {age_hours:.1f}h ago)")
+
+            return {"movies": movies[:20], "total": len(movies)}
+
     except Exception as e:
         print(f"  ✗ Error: {e}")
         return {"error": str(e)}

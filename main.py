@@ -88,36 +88,9 @@ RATE_LIMIT_WINDOW = 10800  # 3 hours in seconds
 
 class ChatRequest(BaseModel):
     message: str
-    servers: dict  # Required - contains radarr and sonarr configs
     context: Optional[str] = None  # Optional context like "discover"
-
-    @validator('servers')
-    def validate_servers(cls, v):
-        """Validate server configuration (handles both encrypted and plain)"""
-        if not isinstance(v, dict):
-            raise ValueError('servers must be a dictionary')
-
-        # Check if servers are encrypted (values are strings) or plain (values are dicts)
-        for service in ['radarr', 'sonarr']:
-            if service in v:
-                # If it's a string, it's encrypted - skip validation
-                if isinstance(v[service], str):
-                    continue
-
-                # If it's a dict, validate as before
-                if not isinstance(v[service], dict):
-                    raise ValueError(f'{service} must be a dictionary or encrypted string')
-
-                # Validate URL format
-                url = v[service].get('url', '')
-                if url and not re.match(r'^https?://', url):
-                    raise ValueError(f'{service} URL must start with http:// or https://')
-
-                # Validate API key exists
-                if 'api_key' not in v[service]:
-                    raise ValueError(f'{service} must have an api_key')
-
-        return v
+    # NO SERVERS - Zero-knowledge architecture!
+    # Backend uses library_cache from Supabase instead
 
 # Security Functions
 async def verify_mega_subscription(authorization: str = Header(None)) -> str:
@@ -302,71 +275,48 @@ def validate_url(url: str) -> bool:
 # All add/delete/update operations happen on device
 
 # Function for Responses API
-def search_movies_in_library(query: str, servers: dict) -> Dict[str, Any]:
-    """Search for movies already in your library"""
-    print(f"🔧 TOOL CALLED: search_movies_in_library - Query: {query}")
-    
+def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
+    """Search for movies already in your library from Supabase cache"""
+    print(f"🔧 TOOL CALLED: search_movies_in_library - Query: {query} (device: {device_id[:8]}...)")
+
     try:
-        response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        if response.status_code != 200:
-            return {"error": "Failed to get library"}
-        
-        all_movies = response.json()
+        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+        result = supabase.table('library_cache').select('movies, synced_at').eq('device_id', device_id).execute()
+
+        if not result.data:
+            print("  → No cache found - requesting library sync")
+            return {
+                "error": "Library not synced. Please sync your library.",
+                "requires_sync": True
+            }
+
+        cache = result.data[0]
+        all_movies = cache.get('movies', [])
         query_lower = query.lower()
-        
+
         # Search for matches
         matches = []
         for movie in all_movies:
             if query_lower in movie.get("title", "").lower():
                 matches.append({
-                    "id": movie["id"],
                     "title": movie["title"],
                     "year": movie.get("year"),
-                    "hasFile": movie.get("hasFile", False)
+                    "has_file": movie.get("has_file", False),
+                    "tmdb_id": movie.get("tmdb_id"),
+                    "quality": movie.get("quality")
                 })
-        
+
         if not matches:
             return {"matches": [], "message": f"No movies found matching '{query}'"}
-        
+
         print(f"  ✓ Found {len(matches)} matches")
-        return {"matches": matches[:5]}  # Limit to 5 results
-        
+        return {"matches": matches[:10]}  # Limit to 10 results
+
     except Exception as e:
+        print(f"  ✗ Error: {e}")
         return {"error": str(e)}
 
-# Function for Responses API
-def search_media(query: str, servers: dict) -> Dict[str, Any]:
-    """Search for movies or TV shows"""
-    results = {"movies": [], "shows": []}
-    
-    # Search Radarr
-    try:
-        response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie/lookup",
-            params={"term": query},
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            movies = response.json()[:3]  # Limit to 3
-            results["movies"] = [
-                {
-                    "title": m.get("title"), 
-                    "year": m.get("year"), 
-                    "tmdbId": m.get("tmdbId"),
-                    "in_library": m.get("id") is not None
-                }
-                for m in movies
-            ]
-    except Exception as e:
-        results["movie_error"] = str(e)
-    
-    return results
+# Removed search_media - dead code that violated zero-knowledge architecture
 
 # Function for Responses API
 def get_all_shows(device_id: str) -> Dict[str, Any]:
@@ -405,42 +355,47 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 # Function for Responses API
-def get_library_stats(servers: dict) -> Dict[str, Any]:
-    """Get real statistics about the user's media library"""
-    print("🔧 TOOL CALLED: get_library_stats")
-    stats = {"movies": 0, "shows": 0}
-    
+def get_library_stats(device_id: str) -> Dict[str, Any]:
+    """Get statistics about the user's media library from Supabase cache"""
+    print(f"🔧 TOOL CALLED: get_library_stats (device: {device_id[:8]}...)")
+
     try:
-        print("  → Calling Radarr API...")
-        # Get movie count from Radarr
-        response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            movies = response.json()
-            stats["movies"] = len(movies)
-            print(f"  ✓ Found {len(movies)} movies")
+        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+        result = supabase.table('library_cache').select('movies, shows, synced_at').eq('device_id', device_id).execute()
+
+        if not result.data:
+            print("  → No cache found - requesting library sync")
+            return {
+                "error": "Library not synced. Please sync your library.",
+                "requires_sync": True
+            }
+
+        cache = result.data[0]
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  ⚠️  Cache is {age_hours:.1f} hours old - requesting refresh")
+            stats = {
+                "movies": len(cache.get('movies', [])),
+                "shows": len(cache.get('shows', [])),
+                "cache_age_hours": round(age_hours, 1),
+                "requires_sync": True
+            }
+            return stats
+
+        stats = {
+            "movies": len(cache.get('movies', [])),
+            "shows": len(cache.get('shows', [])),
+            "cache_age_hours": round(age_hours, 1)
+        }
+        print(f"  ✓ {stats['movies']} movies, {stats['shows']} shows (cache age: {age_hours:.1f}h)")
+        return stats
+
     except Exception as e:
-        stats["movie_error"] = str(e)
-    
-    try:
-        print("  → Calling Sonarr API...")
-        # Get show count from Sonarr
-        response = httpx.get(
-            f"{servers['sonarr']['url']}/api/v3/series",
-            headers={"X-Api-Key": servers['sonarr']['api_key']},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            shows = response.json()
-            stats["shows"] = len(shows)
-            print(f"  ✓ Found {len(shows)} shows")
-    except Exception as e:
-        stats["show_error"] = str(e)
-    
-    return stats
+        print(f"  ✗ Error: {e}")
+        return {"error": str(e)}
 
 # Removed add_movie_to_radarr - device handles all execution now
 
@@ -828,6 +783,12 @@ OUTPUT:
 # System prompt for CHAT assistant
 CHAT_PROMPT = """You are Z. Manage user's Radarr and Sonarr libraries.
 
+ZERO-KNOWLEDGE ARCHITECTURE:
+- You have access to library_cache from Supabase (synced by device every hour)
+- You NEVER receive or use server credentials - complete privacy!
+- Use get_library_stats, get_all_movies, get_all_shows to check what's in library
+- Device executes ALL operations locally after you stage them
+
 TOOL SELECTION:
 - 1-3 items: Use add_to_queue → Device auto-executes silently
 - 4+ items: Use add_to_stage → Device shows modal for review
@@ -1118,8 +1079,8 @@ def get_chat_tools():
 
 
 # Function dispatcher
-def execute_function(function_name: str, arguments: dict, servers: dict, device_id: str = None) -> dict:
-    """Execute a function call and return the result"""
+def execute_function(function_name: str, arguments: dict, device_id: str) -> dict:
+    """Execute a function call and return the result - ZERO-KNOWLEDGE!"""
     try:
         # Discover tools
         if function_name == "search_movies":
@@ -1132,15 +1093,15 @@ def execute_function(function_name: str, arguments: dict, servers: dict, device_
             return get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
             return add_to_stage(arguments["operation"], arguments["items"], device_id)
-        # Chat tools
+        # Chat tools - all use library_cache, never call user servers!
         elif function_name == "get_library_stats":
-            return get_library_stats(servers)
+            return get_library_stats(device_id)
         elif function_name == "get_all_movies":
             return get_all_movies(device_id)
         elif function_name == "get_all_shows":
             return get_all_shows(device_id)
         elif function_name == "search_movies_in_library":
-            return search_movies_in_library(arguments["query"], servers)
+            return search_movies_in_library(arguments["query"], device_id)
         elif function_name == "add_to_queue":
             return add_to_queue(arguments["items"], device_id)
         else:
@@ -1341,19 +1302,13 @@ async def chat(
     request: ChatRequest,
     device_auth: tuple[str, str] = Depends(verify_device_subscription)
 ):
-    """Chat endpoint - conversational library assistant with HMAC encryption"""
+    """Chat endpoint - ZERO-KNOWLEDGE conversational assistant"""
     device_id, hmac_key = device_auth
     await check_rate_limit(device_id)
 
     try:
         print(f"💬 CHAT: {request.message} (device: {device_id[:8]}...)")
-
-        # Decrypt credentials if encrypted
-        servers = request.servers
-        if servers and isinstance(next(iter(servers.values()), None), str):
-            # Credentials are encrypted - decrypt them
-            servers = decrypt_credentials(servers, hmac_key)
-            print(f"🔐 Decrypted credentials for {list(servers.keys())}")
+        print(f"📦 ZERO-KNOWLEDGE: Backend will NEVER receive or use server credentials!")
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_chat_tools()
@@ -1383,7 +1338,7 @@ async def chat(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, servers, device_id)
+                    result = execute_function(function_name, arguments, device_id)
 
                     # Check if result contains a stage_id (from add_to_queue or add_to_stage)
                     if isinstance(result, dict) and result.get('stage_id'):

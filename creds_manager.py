@@ -73,49 +73,6 @@ def _get_decrypted_servers(device_id: str) -> dict:
     # Decrypt on-the-fly
     return decrypt_credentials(encrypted, hmac_key)
 
-# Secure wrapper functions that AI can call (credentials never exposed)
-
-def secure_add_movie(device_id: str, movie_id: int, quality_profile_id: int, root_folder: str) -> Dict[str, Any]:
-    """Add movie to Radarr without exposing credentials"""
-    servers = _get_decrypted_servers(device_id)
-
-    if 'radarr' not in servers:
-        return {"error": "Radarr not configured"}
-
-    radarr = servers['radarr']
-
-    try:
-        response = httpx.post(
-            f"{radarr['url']}/api/v3/movie",
-            headers={"X-Api-Key": radarr['api_key']},
-            json={
-                "tmdbId": movie_id,
-                "qualityProfileId": quality_profile_id,
-                "rootFolderPath": root_folder,
-                "monitored": True,
-                "addOptions": {"searchForMovie": True}
-            },
-            timeout=10.0
-        )
-        return response.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-def secure_get_radarr_library(device_id: str) -> Dict[str, Any]:
-    """Get Radarr library without exposing credentials"""
-    servers = _get_decrypted_servers(device_id)
-
-    if 'radarr' not in servers:
-        return {"error": "Radarr not configured"}
-
-    radarr = servers['radarr']
-
-    try:
-        response = httpx.get(
-            f"{radarr['url']}/api/v3/movie",
-            headers={"X-Api-Key": radarr['api_key']},
-            timeout=10.0
-        )
-        return {"movies": response.json()}
-    except Exception as e:
-        return {"error": str(e)}
+# NO SECURE WRAPPER FUNCTIONS
+# Backend never calls user servers - all operations happen on device
+# This ensures zero IP logging and complete privacy

@@ -384,27 +384,39 @@ def search_media(query: str, servers: dict) -> Dict[str, Any]:
     return results
 
 # Function for Responses API
-def get_all_shows(servers: dict) -> Dict[str, Any]:
-    """Get list of all TV shows in the library with genres"""
-    print("🔧 TOOL CALLED: get_all_shows")
+def get_all_shows(device_id: str) -> Dict[str, Any]:
+    """Get list of all TV shows in the library from Supabase cache"""
+    print(f"🔧 TOOL CALLED: get_all_shows (device: {device_id[:8]}...)")
     try:
-        response = httpx.get(
-            f"{servers['sonarr']['url']}/api/v3/series",
-            headers={"X-Api-Key": servers['sonarr']['api_key']},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            shows = response.json()
-            show_list = []
-            for show in shows[:10]:  # Limit to 10 for readability
-                show_list.append({
-                    "title": show.get("title"),
-                    "genres": show.get("genres", []),
-                    "year": show.get("year")
-                })
-            print(f"  ✓ Retrieved {len(show_list)} shows")
-            return {"shows": show_list, "total": len(shows)}
+        # Read from Supabase library_cache
+        result = supabase.table('library_cache').select('shows, synced_at').eq('device_id', device_id).execute()
+
+        if not result.data:
+            # No cache exists - request sync
+            print("  → No cache found - requesting library sync")
+            return {
+                "error": "Library not synced. Please sync your library.",
+                "requires_sync": True
+            }
+
+        cache = result.data[0]
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+            return {
+                "error": "Library cache is stale. Syncing...",
+                "requires_sync": True
+            }
+
+        shows = cache.get('shows', [])
+        print(f"  ✓ Retrieved {len(shows[:10])} shows from cache (showing first 10 of {len(shows)} total, synced {age_hours:.1f}h ago)")
+
+        return {"shows": shows[:10], "total": len(shows)}
     except Exception as e:
+        print(f"  ✗ Error: {e}")
         return {"error": str(e)}
 
 # Function for Responses API
@@ -538,30 +550,39 @@ def add_movie_to_radarr(tmdb_id: int, title: str, servers: dict) -> Dict[str, An
         return {"error": str(e)}
 
 # Function for Responses API
-def get_all_movies(servers: dict) -> Dict[str, Any]:
-    """Get list of all movies in the library with genres"""
-    print("🔧 TOOL CALLED: get_all_movies")
+def get_all_movies(device_id: str) -> Dict[str, Any]:
+    """Get list of all movies in the library from Supabase cache"""
+    print(f"🔧 TOOL CALLED: get_all_movies (device: {device_id[:8]}...)")
     try:
-        response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            movies = response.json()
-            movie_list = []
-            for movie in movies[:20]:  # Limit to 20 for readability
-                movie_list.append({
-                    "title": movie.get("title"),
-                    "year": movie.get("year"),
-                    "genres": movie.get("genres", []),
-                    "tmdbId": movie.get("tmdbId"),
-                    "sizeOnDisk": movie.get("sizeOnDisk", 0) / (1024**3),  # Convert to GB
-                    "hasFile": movie.get("hasFile", False)
-                })
-            print(f"  ✓ Retrieved {len(movie_list)} movies (showing first 20 of {len(movies)} total)")
-            return {"movies": movie_list, "total": len(movies)}
+        # Read from Supabase library_cache
+        result = supabase.table('library_cache').select('movies, synced_at').eq('device_id', device_id).execute()
+
+        if not result.data:
+            # No cache exists - request sync
+            print("  → No cache found - requesting library sync")
+            return {
+                "error": "Library not synced. Please sync your library.",
+                "requires_sync": True
+            }
+
+        cache = result.data[0]
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+            return {
+                "error": "Library cache is stale. Syncing...",
+                "requires_sync": True
+            }
+
+        movies = cache.get('movies', [])
+        print(f"  ✓ Retrieved {len(movies[:20])} movies from cache (showing first 20 of {len(movies)} total, synced {age_hours:.1f}h ago)")
+
+        return {"movies": movies[:20], "total": len(movies)}
     except Exception as e:
+        print(f"  ✗ Error: {e}")
         return {"error": str(e)}
 
 # Function for Responses API
@@ -1202,9 +1223,9 @@ def execute_function(function_name: str, arguments: dict, servers: dict, device_
         elif function_name == "get_library_stats":
             return get_library_stats(servers)
         elif function_name == "get_all_movies":
-            return get_all_movies(servers)
+            return get_all_movies(device_id)
         elif function_name == "get_all_shows":
-            return get_all_shows(servers)
+            return get_all_shows(device_id)
         elif function_name == "search_movies_in_library":
             return search_movies_in_library(arguments["query"], servers)
         elif function_name == "add_movie_to_radarr":
@@ -1427,6 +1448,7 @@ async def chat(
         tools = get_chat_tools()
         max_iterations = 25
         iteration = 0
+        pending_commands = []  # Track commands to send to device
 
         while iteration < max_iterations:
             iteration += 1
@@ -1450,6 +1472,14 @@ async def chat(
                     print(f"  🔧 {function_name}({arguments})")
 
                     result = execute_function(function_name, arguments, servers, device_id)
+
+                    # Check if result requires library sync
+                    if isinstance(result, dict) and result.get('requires_sync'):
+                        pending_commands.append({
+                            "action": "sync_library",
+                            "services": ["radarr", "sonarr"]
+                        })
+                        print("  → Added sync_library command")
 
                     input_messages.append({
                         "type": "function_call",
@@ -1480,10 +1510,17 @@ async def chat(
                 # Stage IDs are UUIDs, so if response looks like one, treat as stage
                 if len(output_text) == 36 and output_text.count('-') == 4:
                     print(f"📦 Staged operation: {output_text}")
-                    return {"response": output_text, "stage_id": output_text, "staged": True}
+                    response_data = {"response": output_text, "stage_id": output_text, "staged": True}
+                    if pending_commands:
+                        response_data["commands"] = pending_commands
+                    return response_data
 
                 print(f"💬 Response: {output_text[:100]}...")
-                return {"response": output_text}
+                response_data = {"response": output_text}
+                if pending_commands:
+                    response_data["commands"] = pending_commands
+                    print(f"📤 Sending {len(pending_commands)} commands to device")
+                return response_data
 
         raise HTTPException(status_code=500, detail="Request took too long")
 

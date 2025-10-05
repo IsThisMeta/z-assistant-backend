@@ -1360,6 +1360,7 @@ async def chat(
         max_iterations = 25
         iteration = 0
         pending_commands = []  # Track commands to send to device
+        stage_id = None  # Track if any tool returned a stage_id
 
         while iteration < max_iterations:
             iteration += 1
@@ -1383,6 +1384,11 @@ async def chat(
                     print(f"  🔧 {function_name}({arguments})")
 
                     result = execute_function(function_name, arguments, servers, device_id)
+
+                    # Check if result contains a stage_id (from add_to_queue or add_to_stage)
+                    if isinstance(result, dict) and result.get('stage_id'):
+                        stage_id = result.get('stage_id')
+                        print(f"  → Got stage_id: {stage_id}")
 
                     # Check if result requires library sync
                     if isinstance(result, dict) and result.get('requires_sync'):
@@ -1428,6 +1434,13 @@ async def chat(
 
                 print(f"💬 Response: {output_text[:100]}...")
                 response_data = {"response": output_text}
+
+                # If any tool returned a stage_id, include it in response
+                if stage_id:
+                    response_data["staged"] = True
+                    response_data["stage_id"] = stage_id
+                    print(f"📦 Including stage_id in response: {stage_id}")
+
                 if pending_commands:
                     response_data["commands"] = pending_commands
                     print(f"📤 Sending {len(pending_commands)} commands to device")

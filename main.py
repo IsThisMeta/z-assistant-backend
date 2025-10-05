@@ -281,16 +281,23 @@ def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
 
     try:
         # Read from Supabase library_cache - ZERO-KNOWLEDGE!
-        result = supabase.table('library_cache').select('movies, synced_at').eq('device_id', device_id).execute()
+        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
         if not result.data:
-            print("  → No cache found - requesting library sync")
+            print("  → No cache found - library may be syncing for first time")
             return {
-                "error": "Library not synced. Please sync your library.",
-                "requires_sync": True
+                "message": "Library is being synced for the first time. Please wait a moment and try again."
             }
 
         cache = result.data[0]
+
+        # Check if sync is in progress
+        if cache.get('is_syncing'):
+            print("  → Sync in progress")
+            return {
+                "message": "Library is currently syncing. Please wait a moment and try again."
+            }
+
         all_movies = cache.get('movies', [])
         query_lower = query.lower()
 
@@ -324,17 +331,23 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: get_all_shows (device: {device_id[:8]}...)")
     try:
         # Read from Supabase library_cache
-        result = supabase.table('library_cache').select('shows, synced_at').eq('device_id', device_id).execute()
+        result = supabase.table('library_cache').select('shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
         if not result.data:
-            # No cache exists - request sync
-            print("  → No cache found - requesting library sync")
+            print("  → No cache found - library may be syncing for first time")
             return {
-                "error": "Library not synced. Please sync your library.",
-                "requires_sync": True
+                "message": "Library is being synced for the first time. Please wait a moment and try again."
             }
 
         cache = result.data[0]
+
+        # Check if sync is in progress
+        if cache.get('is_syncing'):
+            print("  → Sync in progress")
+            return {
+                "message": "Library is currently syncing. Please wait a moment and try again."
+            }
+
         synced_at = datetime.fromisoformat(cache['synced_at'])
         age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
@@ -361,16 +374,23 @@ def get_library_stats(device_id: str) -> Dict[str, Any]:
 
     try:
         # Read from Supabase library_cache - ZERO-KNOWLEDGE!
-        result = supabase.table('library_cache').select('movies, shows, synced_at').eq('device_id', device_id).execute()
+        result = supabase.table('library_cache').select('movies, shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
         if not result.data:
-            print("  → No cache found - requesting library sync")
+            print("  → No cache found - library may be syncing for first time")
             return {
-                "error": "Library not synced. Please sync your library.",
-                "requires_sync": True
+                "message": "Library is being synced for the first time. Please wait a moment and try again."
             }
 
         cache = result.data[0]
+
+        # Check if sync is in progress
+        if cache.get('is_syncing'):
+            print("  → Sync in progress")
+            return {
+                "message": "Library is currently syncing. Please wait a moment and try again."
+            }
+
         synced_at = datetime.fromisoformat(cache['synced_at'])
         age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
@@ -405,14 +425,21 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: get_all_movies (device: {device_id[:8]}...)")
     try:
         # Read from Supabase library_cache
-        result = supabase.table('library_cache').select('movies, synced_at').eq('device_id', device_id).execute()
+        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
         if not result.data:
-            # No cache exists - request sync
-            print("  → No cache found - requesting library sync")
+            print("  → No cache found - library may be syncing for first time")
             return {
-                "error": "Library not synced. Please sync your library.",
-                "requires_sync": True
+                "message": "Library is being synced for the first time. Please wait a moment and try again."
+            }
+
+        cache = result.data[0]
+
+        # Check if sync is in progress
+        if cache.get('is_syncing'):
+            print("  → Sync in progress")
+            return {
+                "message": "Library is currently syncing. Please wait a moment and try again."
             }
 
         cache = result.data[0]

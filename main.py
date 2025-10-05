@@ -69,15 +69,20 @@ class ChatRequest(BaseModel):
 
     @validator('servers')
     def validate_servers(cls, v):
-        """Validate server configuration"""
+        """Validate server configuration (handles both encrypted and plain)"""
         if not isinstance(v, dict):
             raise ValueError('servers must be a dictionary')
 
-        # Validate URLs if radarr/sonarr exist
+        # Check if servers are encrypted (values are strings) or plain (values are dicts)
         for service in ['radarr', 'sonarr']:
             if service in v:
+                # If it's a string, it's encrypted - skip validation
+                if isinstance(v[service], str):
+                    continue
+
+                # If it's a dict, validate as before
                 if not isinstance(v[service], dict):
-                    raise ValueError(f'{service} must be a dictionary')
+                    raise ValueError(f'{service} must be a dictionary or encrypted string')
 
                 # Validate URL format
                 url = v[service].get('url', '')

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from pydantic import BaseModel, validator
 from openai import OpenAI
 import httpx
@@ -29,6 +29,30 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 app = FastAPI()
+
+@app.middleware("http")
+async def mask_request_logging(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration_ms = (time.time() - start_time) * 1000
+
+    client_identifier = request.headers.get("X-Device-Id") or request.headers.get("X-User-Id")
+    if client_identifier:
+        if len(client_identifier) > 8:
+            client_identifier = f"{client_identifier[:8]}..."
+    else:
+        client_identifier = "masked"
+
+    logger.info(
+        "HTTP %s %s -> %d (%.2f ms) client=%s",
+        request.method,
+        request.url.path,
+        response.status_code,
+        duration_ms,
+        client_identifier,
+    )
+
+    return response
 
 # Initialize OpenAI client
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -274,47 +298,8 @@ def validate_url(url: str) -> bool:
     """Validate URL format"""
     return bool(re.match(r'^https?://[^\s]+$', url))
 
-# Define tools that accept servers parameter
-def delete_movie(movie_id: int, delete_files: bool, servers: dict) -> Dict[str, Any]:
-    """Delete a movie from Radarr"""
-    print(f"🔧 TOOL CALLED: delete_movie - Removing movie ID {movie_id}")
-    
-    try:
-        # First get movie details to show what we're deleting
-        movie_response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie/{movie_id}",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        if movie_response.status_code != 200:
-            return {"error": f"Movie with ID {movie_id} not found"}
-        
-        movie_data = movie_response.json()
-        movie_title = movie_data.get("title", "Unknown")
-        
-        print(f"  → Deleting: {movie_title}")
-        
-        # Delete the movie
-        delete_response = httpx.delete(
-            f"{servers['radarr']['url']}/api/v3/movie/{movie_id}",
-            params={"deleteFiles": str(delete_files).lower()},
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        if delete_response.status_code in [200, 202, 204]:
-            print(f"  ✓ Successfully deleted {movie_title}")
-            return {
-                "success": True,
-                "message": f"Deleted {movie_title}" + (" and its files" if delete_files else " (kept files)"),
-                "deleted_movie": movie_title
-            }
-        else:
-            return {"error": f"Failed to delete movie: {delete_response.status_code}"}
-            
-    except Exception as e:
-        return {"error": str(e)}
+# Zero-knowledge architecture: Backend never calls user servers
+# All add/delete/update operations happen on device
 
 # Function for Responses API
 def search_movies_in_library(query: str, servers: dict) -> Dict[str, Any]:
@@ -457,97 +442,7 @@ def get_library_stats(servers: dict) -> Dict[str, Any]:
     
     return stats
 
-# Function for Responses API
-def add_movie_to_radarr(tmdb_id: int, title: str, servers: dict) -> Dict[str, Any]:
-    """Add a movie to Radarr by TMDB ID"""
-    # Convert to int if it comes as float
-    tmdb_id = int(tmdb_id)
-    print(f"🔧 TOOL CALLED: add_movie_to_radarr - Adding {title} (TMDB: {tmdb_id})")
-    
-    try:
-        # First, let's try a general lookup with the TMDB ID
-        lookup_response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/movie/lookup",
-            params={"term": f"tmdb:{tmdb_id}"},
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        print(f"  → Lookup URL: {servers['radarr']['url']}/api/v3/movie/lookup?term=tmdb:{tmdb_id}")
-        print(f"  → Response status: {lookup_response.status_code}")
-        
-        if lookup_response.status_code != 200:
-            print(f"  → Response body: {lookup_response.text}")
-            return {"error": f"Failed to lookup movie: {lookup_response.status_code}"}
-        
-        movies = lookup_response.json()
-        if not movies:
-            return {"error": "Movie not found"}
-        
-        movie_data = movies[0]  # Get the first result
-        
-        # Check if already in library
-        if movie_data.get("id"):
-            return {"error": f"{title} is already in your library!"}
-        
-        # Get root folders to use the first available one
-        folders_response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/rootfolder",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        root_folder = "/movies"  # default
-        if folders_response.status_code == 200:
-            folders = folders_response.json()
-            if folders:
-                root_folder = folders[0]["path"]
-                print(f"  → Using root folder: {root_folder}")
-        
-        # Get quality profiles to use the first available one
-        profiles_response = httpx.get(
-            f"{servers['radarr']['url']}/api/v3/qualityprofile",
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        quality_profile_id = 1  # default
-        if profiles_response.status_code == 200:
-            profiles = profiles_response.json()
-            if profiles:
-                quality_profile_id = profiles[0]["id"]
-                print(f"  → Using quality profile: {profiles[0]['name']} (ID: {quality_profile_id})")
-        
-        # Add to Radarr
-        add_data = {
-            "title": movie_data["title"],
-            "tmdbId": tmdb_id,
-            "year": movie_data["year"],
-            "qualityProfileId": quality_profile_id,
-            "rootFolderPath": root_folder,
-            "monitored": True,
-            "addOptions": {
-                "searchForMovie": True
-            }
-        }
-        
-        add_response = httpx.post(
-            f"{servers['radarr']['url']}/api/v3/movie",
-            json=add_data,
-            headers={"X-Api-Key": servers['radarr']['api_key']},
-            timeout=10.0
-        )
-        
-        if add_response.status_code in [200, 201]:
-            print(f"  ✓ Successfully added {title} to Radarr!")
-            return {"success": True, "message": f"Added {title} to your library and started searching for it!"}
-        else:
-            print(f"  → Add failed: {add_response.status_code}")
-            print(f"  → Response: {add_response.text}")
-            return {"error": f"Failed to add movie: {add_response.status_code}"}
-            
-    except Exception as e:
-        return {"error": str(e)}
+# Removed add_movie_to_radarr - device handles all execution now
 
 # Function for Responses API
 def get_all_movies(device_id: str) -> Dict[str, Any]:
@@ -787,6 +682,11 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
         return {"movies": [], "shows": [], "error": str(e)}
 
 # Function for Responses API
+def add_to_queue(items: List[Dict], device_id: str = None) -> Dict[str, Any]:
+    """Queue 1-3 items for instant execution on device (no modal)"""
+    return add_to_stage(operation="queue", items=items, device_id=device_id)
+
+# Function for Responses API
 def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Dict[str, Any]:
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
@@ -928,9 +828,13 @@ OUTPUT:
 # System prompt for CHAT assistant
 CHAT_PROMPT = """You are Z. Manage user's Radarr and Sonarr libraries.
 
-THRESHOLD RULE:
-- 1-3 items: Execute directly (add_movie_to_radarr, delete_movie, etc.)
-- 4+ items: Stage for confirmation (add_to_stage)
+TOOL SELECTION:
+- 1-3 items: Use add_to_queue → Device auto-executes silently
+- 4+ items: Use add_to_stage → Device shows modal for review
+
+RESPONSE STYLE:
+- Queue (1-3): Say "I've added X to your library" (device handles it instantly)
+- Stage (4+): Say "I've staged X items for review" (device shows modal)
 
 OPERATIONS:
 - "add" = green badge
@@ -938,19 +842,32 @@ OPERATIONS:
 - "update" = blue badge
 
 EXAMPLES:
-"Add The Matrix" → Direct execution (1 item)
-"Add Inception, Tenet, Interstellar" → Direct execution (3 items)
-"Add all Nolan movies" → Stage with operation="add"
-"Delete movies under 5.0" → Stage with operation="remove"
+
+"Add Ocean's 11"
+→ search_movies → add_to_queue(items=[{tmdb_id: 161, media_type: "movie"}])
+→ Say: "I've added Ocean's 11 to your library"
+
+"Add Inception, Tenet, and Interstellar"
+→ search_movies (3x) → add_to_queue(items=[...3 movies...])
+→ Say: "I've added Inception, Tenet, and Interstellar"
+
+"Add all Christopher Nolan movies"
+→ search_movies (12x) → add_to_stage(operation="add", items=[...12 movies...])
+→ Say: "I've staged 12 Nolan movies for your review"
+
+"Delete all movies under 5.0 rating"
+→ get_all_movies → filter → add_to_stage(operation="remove", items=[...])
+→ Say: "I've staged X movies for removal"
 
 TV SHOWS:
 - Default to Season 1 unless specified
 
-STAGING (4+ items):
-1. Get the items (search/filter)
-2. Build array: [{{"tmdb_id": 123, "media_type": "movie"}}, ...]
-3. add_to_stage(operation="add/remove/update", items=<array>)
-4. Return stage_id"""
+WORKFLOW:
+1. Search for items (search_movies, get_all_movies, etc.)
+2. Check count: 1-3 = queue, 4+ = stage
+3. Build items array: [{{"tmdb_id": 123, "media_type": "movie"}}, ...]
+4. Call appropriate tool
+5. Return stage_id"""
 
 
 # Tool definitions for DISCOVER view
@@ -1118,30 +1035,26 @@ def get_chat_tools():
         },
         {
             "type": "function",
-            "name": "add_movie_to_radarr",
-            "description": "Add a single movie to Radarr (for 1-3 items only)",
+            "name": "add_to_queue",
+            "description": "Queue 1-3 items for instant execution on device. Device auto-executes without showing modal. Use for quick adds.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "tmdb_id": {"type": "integer", "description": "TMDB ID of the movie"},
-                    "title": {"type": "string", "description": "Title of the movie"}
+                    "items": {
+                        "type": "array",
+                        "description": "Array of 1-3 items with tmdb_id and media_type",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "tmdb_id": {"type": "integer"},
+                                "media_type": {"type": "string", "enum": ["movie", "tv"]}
+                            },
+                            "required": ["tmdb_id", "media_type"],
+                            "additionalProperties": False
+                        }
+                    }
                 },
-                "required": ["tmdb_id", "title"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "delete_movie",
-            "description": "Delete a single movie from Radarr (for 1-3 items only)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "movie_id": {"type": "integer", "description": "Radarr movie ID"},
-                    "delete_files": {"type": "boolean", "description": "Whether to delete files"}
-                },
-                "required": ["movie_id", "delete_files"],
+                "required": ["items"],
                 "additionalProperties": False
             },
             "strict": True
@@ -1228,10 +1141,8 @@ def execute_function(function_name: str, arguments: dict, servers: dict, device_
             return get_all_shows(device_id)
         elif function_name == "search_movies_in_library":
             return search_movies_in_library(arguments["query"], servers)
-        elif function_name == "add_movie_to_radarr":
-            return add_movie_to_radarr(arguments["tmdb_id"], arguments["title"], servers)
-        elif function_name == "delete_movie":
-            return delete_movie(arguments["movie_id"], arguments["delete_files"], servers)
+        elif function_name == "add_to_queue":
+            return add_to_queue(arguments["items"], device_id)
         else:
             return {"error": f"Unknown function: {function_name}"}
     except Exception as e:

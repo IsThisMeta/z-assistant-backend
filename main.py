@@ -1262,14 +1262,9 @@ async def discover(
     try:
         print(f"🔍 DISCOVER: {request.message} (device: {device_id[:8]}...)")
 
-        # Decrypt credentials if encrypted - CRITICAL FIX!
-        servers = request.servers or {}
-        if servers and isinstance(next(iter(servers.values()), None), str):
-            # Credentials are encrypted - decrypt them
-            servers = decrypt_credentials(servers, hmac_key)
-            print(f"🔐 Decrypted credentials for {list(servers.keys())}")
-        else:
-            print("📍 No servers provided - using library_cache from Supabase")
+        # ZERO-KNOWLEDGE: No servers needed - using library_cache from Supabase!
+        print("🔐 Zero-knowledge mode - using library_cache from Supabase")
+        servers = {}  # Empty - we don't need server credentials for discover!
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_discover_tools()
@@ -1297,7 +1292,7 @@ async def discover(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, servers, device_id)  # Use decrypted servers!
+                    result = execute_function(function_name, arguments, {}, device_id)  # No servers - zero-knowledge!
 
                     input_messages.append({
                         "type": "function_call",

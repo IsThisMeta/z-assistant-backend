@@ -64,7 +64,9 @@ supabase: Client = create_client(
 )
 
 # Get API keys from environment
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "eaba5719606a782018d06df21c4fe459")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+if not TMDB_API_KEY:
+    raise RuntimeError("TMDB_API_KEY environment variable is required")
 REVENUECAT_SECRET_KEY = os.getenv("REVENUECAT_SECRET_KEY")
 
 # Initialize Upstash Redis for distributed rate limiting
@@ -280,33 +282,18 @@ def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: search_movies_in_library - Query: {query} (device: {device_id[:8]}...)")
 
     try:
-        # Retry up to 3 times if sync is in progress
-        max_retries = 3
-        retry_delay = 5  # seconds
+        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+        # Note: Removed retry logic to avoid blocking - if sync in progress, return immediately
+        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        for attempt in range(max_retries):
-            # Read from Supabase library_cache - ZERO-KNOWLEDGE!
-            result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
+        if not result.data:
+            return {"error": "Library not synced yet. Please sync your library first."}
 
-            if not result.data:
-                print("  → No cache found - library may be syncing for first time")
-                if attempt < max_retries - 1:
-                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                return {"error": "Library not synced yet. Please try again later."}
+        cache = result.data[0]
 
-            cache = result.data[0]
-
-            # Check if sync is in progress
-            if cache.get('is_syncing'):
-                if attempt < max_retries - 1:
-                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    print("  ✗ Sync still in progress after 3 retries")
-                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
+        # Check if sync is in progress
+        if cache.get('is_syncing'):
+            return {"error": "Library sync in progress. Please try again in a moment."}
 
             # Sync complete - search for matches
             all_movies = cache.get('movies', [])
@@ -764,6 +751,10 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
 # Function for Responses API
 def add_to_queue(items: List[Dict], device_id: str = None) -> Dict[str, Any]:
     """Queue 1-3 items for instant execution on device (no modal)"""
+    if not items:
+        return {"error": "add_to_queue requires at least one item"}
+    if len(items) > 3:
+        return {"error": "add_to_queue supports at most 3 items. Use add_to_stage for larger batches."}
     return add_to_stage(operation="queue", items=items, device_id=device_id)
 
 # Function for Responses API
@@ -1194,7 +1185,7 @@ def get_chat_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "enum": ["add", "remove", "update"], "description": "Operation type: add (green), remove (red), update (blue)"},
+                    "operation": {"type": "string", "enum": ["add", "remove", "update", "queue"], "description": "Operation type: add (green), remove (red), update (blue), queue (instant)"},
                     "items": {
                         "type": "array",
                         "description": "Array of items with tmdb_id and media_type",
@@ -1264,7 +1255,6 @@ async def discover(
 
         # ZERO-KNOWLEDGE: No servers needed - using library_cache from Supabase!
         print("🔐 Zero-knowledge mode - using library_cache from Supabase")
-        servers = {}  # Empty - we don't need server credentials for discover!
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_discover_tools()
@@ -1292,7 +1282,7 @@ async def discover(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, {}, device_id)  # No servers - zero-knowledge!
+                    result = execute_function(function_name, arguments, device_id)
 
                     input_messages.append({
                         "type": "function_call",

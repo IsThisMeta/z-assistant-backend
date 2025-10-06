@@ -1263,11 +1263,13 @@ async def discover(
         print(f"🔍 DISCOVER: {request.message} (device: {device_id[:8]}...)")
 
         # Decrypt credentials if encrypted - CRITICAL FIX!
-        servers = request.servers
+        servers = request.servers or {}
         if servers and isinstance(next(iter(servers.values()), None), str):
             # Credentials are encrypted - decrypt them
             servers = decrypt_credentials(servers, hmac_key)
             print(f"🔐 Decrypted credentials for {list(servers.keys())}")
+        else:
+            print("📍 No servers provided - using library_cache from Supabase")
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_discover_tools()

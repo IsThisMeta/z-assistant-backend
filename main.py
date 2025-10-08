@@ -91,7 +91,7 @@ AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # defaul
 
 class ChatRequest(BaseModel):
     message: str
-    context: Optional[str] = None  # Optional context like "discover"
+    context: Optional[str] = None  # Optional context like "explore"
     # NO SERVERS - Zero-knowledge architecture!
     # Backend uses library_cache from Supabase instead
 
@@ -799,7 +799,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         # Just need the basics from AI
         tmdb_id = item.get("tmdb_id")
         media_type = item.get("media_type", "movie")
-        reason = item.get("reason")  # Optional reason for discovery
+        reason = item.get("reason")  # Optional reason for explore recommendations
 
         if not tmdb_id:
             print(f"⚠️ Skipping item without tmdb_id: {item}")
@@ -835,7 +835,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
                     "verified": True  # Already verified if we got TMDB data
                 }
 
-                # Include reason if provided (for discover operations)
+                # Include reason if provided (for explore operations)
                 if reason:
                     processed_item["reason"] = reason
 
@@ -905,7 +905,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
             "error": str(e)
         }
 
-# Unified system prompt for both discovery and library management
+# Unified system prompt for both explore and library management
 UNIFIED_PROMPT = """You are Z, an AI assistant for media discovery and library management.
 
 ZERO-KNOWLEDGE ARCHITECTURE:
@@ -916,12 +916,12 @@ ZERO-KNOWLEDGE ARCHITECTURE:
 
 QUERY TYPE DETECTION:
 
-DISCOVERY QUERIES (recommendations, browsing):
+EXPLORE QUERIES (recommendations, browsing):
 - "show me movies like Pearl"
 - "Leonardo DiCaprio movies"
 - "sci-fi from the 90s"
 - "what should I watch tonight"
-→ Use add_to_stage(operation="discover", items=[...])
+→ Use add_to_stage(operation="explore", items=[...])
 → Response: Natural conversational style with quick reasons and content warnings
 → ALWAYS check library first with get_all_movies/get_all_shows and filter out what they own
 
@@ -940,21 +940,21 @@ ACTOR QUERIES ("Leonardo DiCaprio movies"):
 3. get_all_movies → filter out owned titles
 4. Filter by year/rating as requested
 5. Build items array with reasons: [{{"tmdb_id": 577922, "media_type": "movie", "reason": "direct companion/prequel by the same director; same aesthetic and cast"}}, ...]
-6. add_to_stage(operation="discover", items=<array>)
+6. add_to_stage(operation="explore", items=<array>)
 
 DIRECTOR QUERIES ("Christopher Nolan movies"):
 1. search_person → get person_id
 2. get_person_credits → filter to movies (exclude TV)
 3. get_all_movies → filter out owned titles
 4. Build items array with reasons
-5. add_to_stage(operation="discover", items=<array>)
+5. add_to_stage(operation="explore", items=<array>)
 
 THEME QUERIES ("sci-fi from the 90s"):
 1. web_search for comprehensive lists
 2. Verify each title via TMDB search to get IDs
 3. get_all_movies/get_all_shows → filter out owned titles
 4. Build items array with reasons
-5. add_to_stage(operation="discover", items=<array>)
+5. add_to_stage(operation="explore", items=<array>)
 
 TMDB SEARCH RULES:
 - When calling search_movies/search_shows, use simple queries: just the title, optionally the 4-digit year.
@@ -978,7 +978,7 @@ Delete items:
 
 RESPONSE STYLES:
 
-Discovery (operation="discover"):
+Explore (operation="explore"):
 - Natural, conversational explanations in the response text
 - IMPORTANT: Include a "reason" field in each item explaining why it's recommended
 - Keep reasons concise: 1-2 sentences max
@@ -992,7 +992,7 @@ Library Management (operation="add/remove/update"):
 - No need for "reason" field in items for library operations
 
 OPERATIONS:
-- "discover" = recommendations/browsing
+- "explore" = recommendations/browsing
 - "add" = green badge (adding to library)
 - "remove" = red badge (deleting from library)
 - "update" = blue badge (modifying library items)
@@ -1005,9 +1005,9 @@ OUTPUT:
 - Return stage_id when staging operations"""
 
 
-# Unified tool definitions for both discovery and library management
+# Unified tool definitions for both explore and library management
 def get_unified_tools():
-    """Returns unified toolset for both discovery and library management"""
+    """Returns unified toolset for both explore and library management"""
     return [
         {"type": "web_search"},
         {
@@ -1156,18 +1156,18 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "add_to_stage",
-            "description": "Stage items for visual display or bulk operations. Use 'discover' for recommendations, 'add' for adding to library, 'remove' for deletion, 'update' for modifications. MUST include items array.",
+            "description": "Stage items for visual display or bulk operations. Use 'explore' for poster-style recommendations, 'add' for adding to library, 'remove' for deletion, 'update' for modifications. MUST include items array.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["discover", "add", "remove", "update", "queue"],
-                        "description": "Operation type: discover (recommendations), add (green), remove (red), update (blue), queue (instant)"
+                        "enum": ["explore", "add", "remove", "update", "queue"],
+                        "description": "Operation type: explore (poster mosaic), add (green), remove (red), update (blue), queue (instant)"
                     },
                     "items": {
                         "type": "array",
-                        "description": "Array of items with tmdb_id, media_type, and optional reason (for discover operations)",
+                        "description": "Array of items with tmdb_id, media_type, and optional reason (for explore operations)",
                         "minItems": 1,
                         "items": {
                             "type": "object",
@@ -1176,7 +1176,7 @@ def get_unified_tools():
                                 "media_type": {"type": "string", "enum": ["movie", "tv"]},
                                 "reason": {
                                     "type": ["string", "null"],
-                                    "description": "Why this item is recommended (for discover operations only)"
+                                    "description": "Why this item is recommended (for explore operations only)"
                                 }
                             },
                             "required": ["tmdb_id", "media_type"],
@@ -1334,7 +1334,7 @@ async def chat(
     request: ChatRequest,
     device_auth: tuple[str, str] = Depends(verify_device_subscription)
 ):
-    """Unified chat endpoint - handles both discovery and library management"""
+    """Unified chat endpoint - handles both explore and library management"""
     device_id, hmac_key = device_auth
     await check_rate_limit(device_id)
 
@@ -1348,7 +1348,7 @@ async def chat(
         iteration = 0
         pending_commands = []  # Track commands to send to device
         stage_id = None  # Track if any tool returned a stage_id
-        operation_type = None  # Track the operation type (discover, add, remove, etc.)
+        operation_type = None  # Track the operation type (explore, add, remove, etc.)
         agent_start_time = time.time()
 
         while iteration < max_iterations:
@@ -1426,6 +1426,9 @@ async def chat(
                 if len(output_text) == 36 and output_text.count('-') == 4:
                     print(f"📦 Staged operation: {output_text}")
                     response_data = {"response": output_text, "stage_id": output_text, "staged": True}
+                    if operation_type:
+                        response_data["operation"] = operation_type
+                        print(f"📦 Including operation '{operation_type}' for direct stage response")
                     if pending_commands:
                         response_data["commands"] = pending_commands
                     return response_data
@@ -1433,15 +1436,14 @@ async def chat(
                 print(f"💬 Response: {output_text[:100]}...")
                 response_data = {"response": output_text}
 
-                # If any tool returned a stage_id, include it in response
-                # Use mosaic_id for discover operations, stage_id for library operations
+                # If any tool returned a stage_id, include it in response along with operation type
                 if stage_id:
                     response_data["staged"] = True
-                    if operation_type == "discover":
-                        response_data["mosaic_id"] = stage_id
-                        print(f"🎨 Including mosaic_id in response: {stage_id}")
+                    response_data["stage_id"] = stage_id
+                    if operation_type:
+                        response_data["operation"] = operation_type
+                        print(f"📦 Including stage_id {stage_id} with operation '{operation_type}' in response")
                     else:
-                        response_data["stage_id"] = stage_id
                         print(f"📦 Including stage_id in response: {stage_id}")
 
                 if pending_commands:

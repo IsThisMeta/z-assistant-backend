@@ -769,32 +769,33 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         # Just need the basics from AI
         tmdb_id = item.get("tmdb_id")
         media_type = item.get("media_type", "movie")
-        
+        reason = item.get("reason")  # Optional reason for discovery
+
         if not tmdb_id:
             print(f"⚠️ Skipping item without tmdb_id: {item}")
             continue
-            
+
         # Fetch full data from TMDB
         try:
             endpoint = "movie" if media_type == "movie" else "tv"
             tmdb_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
-            
+
             response = httpx.get(
                 tmdb_url,
                 params={"api_key": TMDB_API_KEY},
                 timeout=5.0
             )
-            
+
             if response.status_code == 200:
                 tmdb_data = response.json()
-                
+
                 # Extract year properly
                 year = 0
                 if media_type == "movie" and tmdb_data.get("release_date"):
                     year = int(tmdb_data["release_date"][:4])
                 elif media_type == "tv" and tmdb_data.get("first_air_date"):
                     year = int(tmdb_data["first_air_date"][:4])
-                
+
                 processed_item = {
                     "tmdb_id": int(tmdb_id),
                     "title": tmdb_data.get("title" if media_type == "movie" else "name", "Unknown"),
@@ -803,30 +804,41 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
                     "poster_path": tmdb_data.get("poster_path", ""),
                     "verified": True  # Already verified if we got TMDB data
                 }
+
+                # Include reason if provided (for discover operations)
+                if reason:
+                    processed_item["reason"] = reason
+
                 processed_items.append(processed_item)
                 print(f"✅ Enriched: {processed_item['title']} ({processed_item['year']}) with poster: {processed_item['poster_path']}")
             else:
                 print(f"❌ TMDB API error for {tmdb_id}: {response.status_code}")
                 # Still add basic item even if TMDB fails
-                processed_items.append({
+                basic_item = {
                     "tmdb_id": int(tmdb_id),
                     "title": item.get("title", "Unknown"),
                     "year": 0,
                     "media_type": media_type,
                     "poster_path": "",
                     "verified": False
-                })
+                }
+                if reason:
+                    basic_item["reason"] = reason
+                processed_items.append(basic_item)
         except Exception as e:
             print(f"❌ Error fetching TMDB data for {tmdb_id}: {e}")
             # Still add basic item
-            processed_items.append({
+            basic_item = {
                 "tmdb_id": int(tmdb_id),
                 "title": item.get("title", "Unknown"),
                 "year": 0,
                 "media_type": media_type,
                 "poster_path": "",
                 "verified": False
-            })
+            }
+            if reason:
+                basic_item["reason"] = reason
+            processed_items.append(basic_item)
     
     # Save to Supabase
     try:
@@ -843,8 +855,8 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         
         return {
             "stage_id": stage_id,
+            "operation": operation,  # Include operation type for frontend routing
             "staged_count": len(processed_items),
-            "operation": operation,
             "ready_for_ui": True,
             "items": processed_items,
             "saved": True,
@@ -855,49 +867,16 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         print(f"Failed to save to Supabase: {e}")
         return {
             "stage_id": stage_id,
+            "operation": operation,  # Include operation type for frontend routing
             "staged_count": len(processed_items),
-            "operation": operation,
             "ready_for_ui": True,
             "items": processed_items,
             "saved": False,
             "error": str(e)
         }
 
-# Helper function to create tools with servers injected
-# System prompt for DISCOVER view
-DISCOVER_PROMPT = """You are Z, a media discovery assistant. Find movies and TV shows, then stage them for visual display.
-
-LIBRARY AWARENESS:
-- Check what's in the library: get_all_movies / get_all_shows
-- Filter out titles they already own before staging
-
-WORKFLOW:
-
-ACTOR QUERIES ("Leonardo DiCaprio movies"):
-1. search_person → get person_id
-2. get_person_credits → complete filmography
-3. Filter by year/rating as requested
-4. Build items array: [{{"tmdb_id": 577922, "media_type": "movie"}}, ...]
-5. add_to_stage(operation="discover", items=<array>)
-
-DIRECTOR QUERIES ("Christopher Nolan movies"):
-1. search_movies for the director's titles
-2. Filter results where director matches
-3. Build items array from results
-4. add_to_stage(operation="discover", items=<array>)
-
-THEME QUERIES ("sci-fi from the 90s"):
-1. web_search for comprehensive lists
-2. Verify each title via TMDB search to get IDs
-3. Build items array
-4. add_to_stage(operation="discover", items=<array>)
-
-OUTPUT:
-- Always include items parameter in add_to_stage
-- Return only the stage_id"""
-
-# System prompt for CHAT assistant
-CHAT_PROMPT = """You are Z. Manage user's Radarr and Sonarr libraries.
+# Unified system prompt for both discovery and library management
+UNIFIED_PROMPT = """You are Z, an AI assistant for media discovery and library management.
 
 ZERO-KNOWLEDGE ARCHITECTURE:
 - You have access to library_cache from Supabase (synced by device daily)
@@ -905,57 +884,147 @@ ZERO-KNOWLEDGE ARCHITECTURE:
 - Use get_library_stats, get_all_movies, get_all_shows to check what's in library
 - Device executes ALL operations locally after you stage them
 
-TOOL SELECTION:
-- 1-3 items: Use add_to_queue → Device auto-executes silently
-- 4+ items: Use add_to_stage → Device shows modal for review
+QUERY TYPE DETECTION:
 
-RESPONSE STYLE:
-- Queue (1-3): Say "I've added X to your library" (device handles it instantly)
-- Stage (4+): Say "I've staged X items for review" (device shows modal)
+DISCOVERY QUERIES (recommendations, browsing):
+- "show me movies like Pearl"
+- "Leonardo DiCaprio movies"
+- "sci-fi from the 90s"
+- "what should I watch tonight"
+→ Use add_to_stage(operation="discover", items=[...])
+→ Response: Natural conversational style with quick reasons and content warnings
+→ ALWAYS check library first with get_all_movies/get_all_shows and filter out what they own
 
-OPERATIONS:
-- "add" = green badge
-- "remove" = red badge
-- "update" = blue badge
+LIBRARY MANAGEMENT (add/remove/update):
+- "add Ocean's 11"
+- "delete all movies under 5.0"
+- "add all Christopher Nolan movies"
+→ 1-3 items: add_to_queue(items=[...]) - instant execution
+→ 4+ items: add_to_stage(operation="add/remove/update", items=[...]) - shows modal
 
-EXAMPLES:
+WORKFLOWS:
 
-"Add Ocean's 11"
+ACTOR QUERIES ("Leonardo DiCaprio movies"):
+1. search_person → get person_id
+2. get_person_credits → complete filmography
+3. get_all_movies → filter out owned titles
+4. Filter by year/rating as requested
+5. Build items array with reasons: [{{"tmdb_id": 577922, "media_type": "movie", "reason": "direct companion/prequel by the same director; same aesthetic and cast"}}, ...]
+6. add_to_stage(operation="discover", items=<array>)
+
+DIRECTOR QUERIES ("Christopher Nolan movies"):
+1. search_movies for the director's titles
+2. Filter results where director matches
+3. get_all_movies → filter out owned titles
+4. Build items array with reasons
+5. add_to_stage(operation="discover", items=<array>)
+
+THEME QUERIES ("sci-fi from the 90s"):
+1. web_search for comprehensive lists
+2. Verify each title via TMDB search to get IDs
+3. get_all_movies/get_all_shows → filter out owned titles
+4. Build items array with reasons
+5. add_to_stage(operation="discover", items=<array>)
+
+LIBRARY OPERATIONS:
+
+Add 1-3 items:
 → search_movies → add_to_queue(items=[{tmdb_id: 161, media_type: "movie"}])
 → Say: "I've added Ocean's 11 to your library"
 
-"Add Inception, Tenet, and Interstellar"
-→ search_movies (3x) → add_to_queue(items=[...3 movies...])
-→ Say: "I've added Inception, Tenet, and Interstellar"
-
-"Add all Christopher Nolan movies"
+Add 4+ items:
 → search_movies (12x) → add_to_stage(operation="add", items=[...12 movies...])
 → Say: "I've staged 12 Nolan movies for your review"
 
-"Delete all movies under 5.0 rating"
+Delete items:
 → get_all_movies → filter → add_to_stage(operation="remove", items=[...])
 → Say: "I've staged X movies for removal"
+
+RESPONSE STYLES:
+
+Discovery (operation="discover"):
+- Natural, conversational explanations in the response text
+- IMPORTANT: Include a "reason" field in each item explaining why it's recommended
+- Keep reasons concise: 1-2 sentences max
+- Example response: "Nice — Pearl is a slow-burn, hyper-stylized period-slasher with a theatrical lead and streaks of dark humor and body/psychological horror. Here are movies with similar tone, themes, or aesthetics:"
+- Example items array: [{{"tmdb_id": 577922, "media_type": "movie", "reason": "direct companion/prequel by the same director; same aesthetic and cast"}}, ...]
+
+Library Management (operation="add/remove/update"):
+- Queue (1-3): "I've added X to your library"
+- Stage (4+): "I've staged X items for review"
+- Concise and action-oriented
+- No need for "reason" field in items for library operations
+
+OPERATIONS:
+- "discover" = recommendations/browsing
+- "add" = green badge (adding to library)
+- "remove" = red badge (deleting from library)
+- "update" = blue badge (modifying library items)
 
 TV SHOWS:
 - Default to Season 1 unless specified
 
-WORKFLOW:
-1. Search for items (search_movies, get_all_movies, etc.)
-2. Check count: 1-3 = queue, 4+ = stage
-3. Build items array: [{{"tmdb_id": 123, "media_type": "movie"}}, ...]
-4. Call appropriate tool
-5. Return stage_id"""
+OUTPUT:
+- Always include items parameter in add_to_stage
+- Return stage_id when staging operations"""
 
 
-# Tool definitions for DISCOVER view
-def get_discover_tools():
-    """Returns tools for discover/search functionality"""
+# Unified tool definitions for both discovery and library management
+def get_unified_tools():
+    """Returns unified toolset for both discovery and library management"""
     return [
         {"type": "web_search"},
         {
             "type": "function",
+            "name": "get_library_stats",
+            "description": "Get statistics about the user's media library (movie and show counts)",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_all_movies",
+            "description": "Get all movies in user's library with TMDB IDs. Use to check what they already have or for bulk operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_all_shows",
+            "description": "Get all TV shows in user's library. Use to check what they already have or for bulk operations.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "search_movies_in_library",
+            "description": "Search for movies already in the user's library",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Movie title to search for"}
+                },
+                "required": ["query"],
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
             "name": "search_movies",
-            "description": "Search for movies on TMDB. Returns director information for filtering.",
+            "description": "Search for movies on TMDB. Returns director information and full details.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -969,7 +1038,7 @@ def get_discover_tools():
         {
             "type": "function",
             "name": "search_shows",
-            "description": "Search for TV shows on TMDB.",
+            "description": "Search for TV shows on TMDB",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -983,7 +1052,7 @@ def get_discover_tools():
         {
             "type": "function",
             "name": "search_person",
-            "description": "Search for people (actors, directors, etc.) on TMDB to get their ID.",
+            "description": "Search for people (actors, directors, etc.) on TMDB to get their ID",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1010,102 +1079,14 @@ def get_discover_tools():
         },
         {
             "type": "function",
-            "name": "get_all_movies",
-            "description": "Get all movies in user's library to filter out what they already have",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "get_all_shows",
-            "description": "Get all TV shows in user's library to filter out what they already have",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "add_to_stage",
-            "description": "Stage items for display in UI. MUST include items array.",
+            "name": "get_show_episodes",
+            "description": "Get detailed episode list for a TV show including which episodes you have. Requests episode data from device in real-time.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "description": "Operation type like 'discover'"},
-                    "items": {
-                        "type": "array",
-                        "description": "Array of items with tmdb_id and media_type",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "tmdb_id": {"type": "integer"},
-                                "media_type": {"type": "string", "enum": ["movie", "tv"]}
-                            },
-                            "required": ["tmdb_id", "media_type"],
-                            "additionalProperties": False
-                        }
-                    }
+                    "show_title": {"type": "string", "description": "Title of the TV show to get episodes for"}
                 },
-                "required": ["operation", "items"],
-                "additionalProperties": False
-            },
-            "strict": True
-        }
-    ]
-
-# Tool definitions for CHAT assistant
-def get_chat_tools():
-    """Returns tools for library management chat"""
-    return [
-        {
-            "type": "function",
-            "name": "get_library_stats",
-            "description": "Get statistics about the user's media library (movie and show counts)",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "get_all_movies",
-            "description": "Get all movies in user's library with TMDB IDs for bulk operations",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "get_all_shows",
-            "description": "Get all TV shows in user's library for bulk operations",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "search_movies_in_library",
-            "description": "Search for movies already in the user's library",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Movie title to search for"}
-                },
-                "required": ["query"],
+                "required": ["show_title"],
                 "additionalProperties": False
             },
             "strict": True
@@ -1113,7 +1094,7 @@ def get_chat_tools():
         {
             "type": "function",
             "name": "add_to_queue",
-            "description": "Queue 1-3 items for instant execution on device. Device auto-executes without showing modal. Use for quick adds.",
+            "description": "Queue 1-3 items for instant execution on device. Device auto-executes without showing modal. Use for quick adds to library.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1138,62 +1119,21 @@ def get_chat_tools():
         },
         {
             "type": "function",
-            "name": "get_show_episodes",
-            "description": "Get detailed episode list for a TV show including which episodes you have. Requests episode data from device in real-time.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "show_title": {"type": "string", "description": "Title of the TV show to get episodes for"}
-                },
-                "required": ["show_title"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "search_movies",
-            "description": "Search for movies on TMDB to get their ID",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Movie title to search for"}
-                },
-                "required": ["query"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
-            "name": "search_shows",
-            "description": "Search for TV shows on TMDB to get their ID",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "TV show title to search for"}
-                },
-                "required": ["query"],
-                "additionalProperties": False
-            },
-            "strict": True
-        },
-        {
-            "type": "function",
             "name": "add_to_stage",
-            "description": "Stage 4+ items for user confirmation. MUST include items array.",
+            "description": "Stage items for visual display or bulk operations. Use 'discover' for recommendations, 'add' for adding to library, 'remove' for deletion, 'update' for modifications. MUST include items array.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "enum": ["add", "remove", "update", "queue"], "description": "Operation type: add (green), remove (red), update (blue), queue (instant)"},
+                    "operation": {"type": "string", "enum": ["discover", "add", "remove", "update", "queue"], "description": "Operation type: discover (recommendations), add (green), remove (red), update (blue), queue (instant)"},
                     "items": {
                         "type": "array",
-                        "description": "Array of items with tmdb_id and media_type",
+                        "description": "Array of items with tmdb_id, media_type, and optional reason (for discover operations)",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "tmdb_id": {"type": "integer"},
-                                "media_type": {"type": "string", "enum": ["movie", "tv"]}
+                                "media_type": {"type": "string", "enum": ["movie", "tv"]},
+                                "reason": {"type": "string", "description": "Why this item is recommended (for discover operations only)"}
                             },
                             "required": ["tmdb_id", "media_type"],
                             "additionalProperties": False
@@ -1240,86 +1180,6 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
             return {"error": f"Unknown function: {function_name}"}
     except Exception as e:
         return {"error": str(e)}
-
-@app.post("/discover")
-async def discover(
-    request: ChatRequest,
-    device_auth: tuple[str, str] = Depends(verify_device_subscription)
-):
-    """Discover endpoint - search for media and return stage_id"""
-    device_id, hmac_key = device_auth
-    await check_rate_limit(device_id)
-
-    try:
-        print(f"🔍 DISCOVER: {request.message} (device: {device_id[:8]}...)")
-
-        # ZERO-KNOWLEDGE: No servers needed - using library_cache from Supabase!
-        print("🔐 Zero-knowledge mode - using library_cache from Supabase")
-
-        input_messages = [{"role": "user", "content": request.message}]
-        tools = get_discover_tools()
-        max_iterations = 25
-        iteration = 0
-
-        while iteration < max_iterations:
-            iteration += 1
-            print(f"\n🔄 Iteration {iteration}")
-
-            response = openai_client.responses.create(
-                model="gpt-5-mini",
-                instructions=DISCOVER_PROMPT,
-                input=input_messages,
-                tools=tools,
-            )
-
-            has_function_calls = False
-            for item in response.output:
-                if item.type == "function_call":
-                    has_function_calls = True
-                    function_name = item.name
-                    arguments = json.loads(item.arguments)
-                    call_id = item.call_id
-
-                    print(f"  🔧 {function_name}({arguments})")
-
-                    result = execute_function(function_name, arguments, device_id)
-
-                    input_messages.append({
-                        "type": "function_call",
-                        "call_id": call_id,
-                        "name": function_name,
-                        "arguments": item.arguments
-                    })
-
-                    input_messages.append({
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(result)
-                    })
-
-                    print(f"  ✅ {json.dumps(result)[:100]}...")
-
-            if not has_function_calls:
-                output_text = ""
-                for item in response.output:
-                    if item.type == "message":
-                        for content in item.content:
-                            if hasattr(content, 'text'):
-                                output_text = content.text
-                                break
-                        break
-
-                stage_id = output_text.strip()
-                print(f"🎯 Returning stage_id: {stage_id}")
-                return {"response": stage_id, "stage_id": stage_id}
-
-        raise HTTPException(status_code=500, detail="Request took too long")
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Discover error: {e}")
-        raise HTTPException(status_code=500, detail="Search failed")
 
 class DeviceRegisterRequest(BaseModel):
     device_id: str
@@ -1430,7 +1290,7 @@ async def chat(
     request: ChatRequest,
     device_auth: tuple[str, str] = Depends(verify_device_subscription)
 ):
-    """Chat endpoint - ZERO-KNOWLEDGE conversational assistant"""
+    """Unified chat endpoint - handles both discovery and library management"""
     device_id, hmac_key = device_auth
     await check_rate_limit(device_id)
 
@@ -1439,11 +1299,12 @@ async def chat(
         print(f"📦 ZERO-KNOWLEDGE: Backend will NEVER receive or use server credentials!")
 
         input_messages = [{"role": "user", "content": request.message}]
-        tools = get_chat_tools()
+        tools = get_unified_tools()
         max_iterations = 25
         iteration = 0
         pending_commands = []  # Track commands to send to device
         stage_id = None  # Track if any tool returned a stage_id
+        operation_type = None  # Track the operation type (discover, add, remove, etc.)
 
         while iteration < max_iterations:
             iteration += 1
@@ -1451,7 +1312,7 @@ async def chat(
 
             response = openai_client.responses.create(
                 model="gpt-5-mini",
-                instructions=CHAT_PROMPT,
+                instructions=UNIFIED_PROMPT,
                 input=input_messages,
                 tools=tools,
             )
@@ -1471,7 +1332,10 @@ async def chat(
                     # Check if result contains a stage_id (from add_to_queue or add_to_stage)
                     if isinstance(result, dict) and result.get('stage_id'):
                         stage_id = result.get('stage_id')
-                        print(f"  → Got stage_id: {stage_id}")
+                        # Track operation type to determine response format
+                        if result.get('operation'):
+                            operation_type = result.get('operation')
+                        print(f"  → Got stage_id: {stage_id}, operation: {operation_type}")
 
                     # Check if result requires library sync
                     if isinstance(result, dict) and result.get('requires_sync'):
@@ -1519,10 +1383,15 @@ async def chat(
                 response_data = {"response": output_text}
 
                 # If any tool returned a stage_id, include it in response
+                # Use mosaic_id for discover operations, stage_id for library operations
                 if stage_id:
                     response_data["staged"] = True
-                    response_data["stage_id"] = stage_id
-                    print(f"📦 Including stage_id in response: {stage_id}")
+                    if operation_type == "discover":
+                        response_data["mosaic_id"] = stage_id
+                        print(f"🎨 Including mosaic_id in response: {stage_id}")
+                    else:
+                        response_data["stage_id"] = stage_id
+                        print(f"📦 Including stage_id in response: {stage_id}")
 
                 if pending_commands:
                     response_data["commands"] = pending_commands

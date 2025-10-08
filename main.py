@@ -423,9 +423,13 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
                 }
 
             shows = cache.get('shows', [])
-            print(f"  ✓ Retrieved {len(shows[:10])} shows from cache (showing first 10 of {len(shows)} total, synced {age_hours:.1f}h ago)")
+            sample_count = min(len(shows), 10)
+            if sample_count:
+                print(f"  ✓ Retrieved {len(shows)} shows from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
+            else:
+                print("  ✓ Retrieved 0 shows from cache")
 
-            return {"shows": shows[:10], "total": len(shows)}
+            return {"shows": shows, "total": len(shows)}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -540,9 +544,13 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
                 }
 
             movies = cache.get('movies', [])
-            print(f"  ✓ Retrieved {len(movies[:20])} movies from cache (showing first 20 of {len(movies)} total, synced {age_hours:.1f}h ago)")
+            sample_count = min(len(movies), 20)
+            if sample_count:
+                print(f"  ✓ Retrieved {len(movies)} movies from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
+            else:
+                print("  ✓ Retrieved 0 movies from cache")
 
-            return {"movies": movies[:20], "total": len(movies)}
+            return {"movies": movies, "total": len(movies)}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -788,12 +796,50 @@ def add_to_queue(items: List[Dict], device_id: str = None) -> Dict[str, Any]:
     return add_to_stage(operation="queue", items=items, device_id=device_id)
 
 # Function for Responses API
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_library_show_map(device_id: Optional[str]) -> Dict[int, int]:
+    """Return a mapping of TMDB show IDs to TVDB IDs from the cached library."""
+    if not device_id:
+        return {}
+
+    try:
+        result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
+        if not result.data:
+            return {}
+
+        shows = result.data[0].get('shows', [])
+        mapping: Dict[int, int] = {}
+        for show in shows:
+            tmdb_raw = show.get('tmdbId') or show.get('tmdb_id')
+            tvdb_raw = show.get('tvdbId') or show.get('tvdb_id')
+
+            tmdb_id = _coerce_int(tmdb_raw)
+            tvdb_id = _coerce_int(tvdb_raw)
+
+            if tmdb_id is None or tvdb_id is None:
+                continue
+
+            mapping[tmdb_id] = tvdb_id
+
+        return mapping
+    except Exception as exc:
+        print(f"⚠️  Failed to load TV show mapping from cache: {exc}")
+        return {}
+
+
 def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Dict[str, Any]:
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
     # Enrich items with fresh TMDB data
     processed_items = []
+    library_show_map: Optional[Dict[int, int]] = None
 
     for item in items:
         # Just need the basics from AI
@@ -805,14 +851,21 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
             print(f"⚠️ Skipping item without tmdb_id: {item}")
             continue
 
+        # Track optional IDs the frontend may need (e.g., TVDB for Sonarr)
+        tvdb_value = item.get("tvdb_id") or item.get("tvdbId")
+        tvdb_int = _coerce_int(tvdb_value)
+
         # Fetch full data from TMDB
         try:
             endpoint = "movie" if media_type == "movie" else "tv"
             tmdb_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
+            params = {"api_key": TMDB_API_KEY}
+            if media_type == "tv":
+                params["append_to_response"] = "external_ids"
 
             response = httpx.get(
                 tmdb_url,
-                params={"api_key": TMDB_API_KEY},
+                params=params,
                 timeout=5.0
             )
 
@@ -826,13 +879,30 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
                 elif media_type == "tv" and tmdb_data.get("first_air_date"):
                     year = int(tmdb_data["first_air_date"][:4])
 
+                # Capture TVDB ID for shows if available
+                if media_type == "tv" and not tvdb_value:
+                    tvdb_value = tmdb_data.get("external_ids", {}).get("tvdb_id")
+
+                tvdb_int = _coerce_int(tvdb_value)
+
+                if media_type == "tv" and tvdb_int is None:
+                    if library_show_map is None:
+                        library_show_map = _load_library_show_map(device_id)
+                    try:
+                        tmdb_key = int(tmdb_id)
+                    except (TypeError, ValueError):
+                        tmdb_key = None
+                    if tmdb_key is not None:
+                        tvdb_int = library_show_map.get(tmdb_key)
+
                 processed_item = {
                     "tmdb_id": int(tmdb_id),
                     "title": tmdb_data.get("title" if media_type == "movie" else "name", "Unknown"),
                     "year": year,
                     "media_type": media_type,
                     "poster_path": tmdb_data.get("poster_path", ""),
-                    "verified": True  # Already verified if we got TMDB data
+                    "verified": True,  # Already verified if we got TMDB data
+                    "tvdb_id": tvdb_int,
                 }
 
                 # Include reason if provided (for explore operations)
@@ -850,7 +920,8 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
                     "year": 0,
                     "media_type": media_type,
                     "poster_path": "",
-                    "verified": False
+                    "verified": False,
+                    "tvdb_id": tvdb_int,
                 }
                 if reason:
                     basic_item["reason"] = reason
@@ -864,12 +935,27 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
                 "year": 0,
                 "media_type": media_type,
                 "poster_path": "",
-                "verified": False
+                "verified": False,
+                "tvdb_id": tvdb_int,
             }
             if reason:
                 basic_item["reason"] = reason
             processed_items.append(basic_item)
-    
+
+        # Fallback to cached mapping if enrichment didn't provide TVDB IDs
+        if media_type == "tv" and tvdb_int is None and processed_items:
+            if library_show_map is None:
+                library_show_map = _load_library_show_map(device_id)
+            try:
+                tmdb_key = int(tmdb_id)
+            except (TypeError, ValueError):
+                tmdb_key = None
+            if tmdb_key is not None:
+                resolved_tvdb = library_show_map.get(tmdb_key)
+                if resolved_tvdb is not None:
+                    processed_items[-1]["tvdb_id"] = resolved_tvdb
+                    tvdb_int = resolved_tvdb
+
     # Save to Supabase
     try:
         data = {
@@ -922,7 +1008,9 @@ EXPLORE QUERIES (recommendations, browsing):
 - "sci-fi from the 90s"
 - "what should I watch tonight"
 → Use add_to_stage(operation="explore", items=[...])
-→ Response: Natural conversational style with quick reasons and content warnings
+→ Chat response should be a quick acknowledgement only (e.g., "Awesome — I grabbed a few picks for you. Tap View Explore Results when you're ready.")
+→ DO NOT list individual titles, summaries, reasons, stage IDs, or commands in chat for explore operations — the UI handles those.
+→ You may mention how many options were staged, but nothing more detailed.
 → ALWAYS check library first with get_all_movies/get_all_shows and filter out what they own
 
 LIBRARY MANAGEMENT (add/remove/update):
@@ -979,11 +1067,8 @@ Delete items:
 RESPONSE STYLES:
 
 Explore (operation="explore"):
-- Natural, conversational explanations in the response text
-- IMPORTANT: Include a "reason" field in each item explaining why it's recommended
-- Keep reasons concise: 1-2 sentences max
-- Example response: "Nice — Pearl is a slow-burn, hyper-stylized period-slasher with a theatrical lead and streaks of dark humor and body/psychological horror. Here are movies with similar tone, themes, or aesthetics:"
-- Example items array: [{{"tmdb_id": 577922, "media_type": "movie", "reason": "direct companion/prequel by the same director; same aesthetic and cast"}}, ...]
+- Chat copy: short acknowledgement only (no title lists, no reasons, no stage IDs). Let the button speak for itself.
+- Staged items MUST still include a concise "reason" field per item (1-2 sentences max) so the Explore UI can render it.
 
 Library Management (operation="add/remove/update"):
 - Queue (1-3): "I've added X to your library"

@@ -87,6 +87,7 @@ except Exception as e:
 # Rate limiting configuration
 RATE_LIMIT_REQUESTS = 40  # requests per 3 hours (like ChatGPT)
 RATE_LIMIT_WINDOW = 10800  # 3 hours in seconds
+AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 
 class ChatRequest(BaseModel):
     message: str
@@ -549,59 +550,88 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
 
 # Function for Responses API
 def search_movies(query: str) -> Dict[str, Any]:
-    """Search for movies on TMDB and return a list of results"""
+    """Search for movies on TMDB with light normalization and year hinting."""
     print(f"🔧 TOOL CALLED: search_movies - Query: {query}")
-    
+
+    def _normalize_title_and_year(raw: str) -> tuple[str, Optional[int]]:
+        # Extract a 4-digit year if present
+        year_match = re.search(r"\b(19|20)\d{2}\b", raw)
+        year_val: Optional[int] = int(year_match.group(0)) if year_match else None
+
+        # If year present, keep text before that year as title; else use full
+        title_part = raw[: year_match.start()].strip() if year_match else raw
+
+        # Remove quotes and common noise words
+        title_part = re.sub(r"[\"'`]+", "", title_part)
+        title_part = re.sub(r"\b(film|movie|by)\b", " ", title_part, flags=re.IGNORECASE)
+
+        # Collapse whitespace and trim
+        title_part = re.sub(r"\s+", " ", title_part).strip()
+
+        # As a guard, if normalization produced empty title, fall back to raw
+        if not title_part:
+            title_part = raw
+
+        return title_part, year_val
+
+    # Lightweight in-process cache to avoid duplicate TMDB calls during a chat
+    # Keyed by (normalized_title, year)
+    if not hasattr(search_movies, "_cache"):
+        search_movies._cache = {}
+
     try:
-        search_url = "https://api.themoviedb.org/3/search/movie"
-        params = {
-            "api_key": TMDB_API_KEY,
-            "query": query
-        }
-        
-        response = httpx.get(search_url, params=params, timeout=5.0)
-        if response.status_code == 200:
-            results = response.json().get("results", [])
-            
-            # Return top 5 results with relevant info
+        base_url = "https://api.themoviedb.org/3/search/movie"
+
+        title, year_hint = _normalize_title_and_year(query)
+        cache_key = (title.lower(), year_hint)
+
+        if cache_key in search_movies._cache:
+            cached = search_movies._cache[cache_key]
+            print("  → using cached TMDB search")
+            return cached
+
+        def _tmdb_search(q: str, year: Optional[int]) -> Dict[str, Any]:
+            params = {"api_key": TMDB_API_KEY, "query": q, "include_adult": False}
+            if year is not None:
+                params["year"] = year
+
+            resp = httpx.get(base_url, params=params, timeout=5.0)
+            if resp.status_code != 200:
+                return {"movies": [], "error": f"API error: {resp.status_code}"}
+
+            results = resp.json().get("results", [])
+
             movies = []
             for item in results[:5]:
-                year = None
+                y = None
                 if item.get("release_date"):
                     try:
-                        year = int(item["release_date"][:4])
+                        y = int(item["release_date"][:4])
                     except:
                         pass
-                
-                # Get director info
-                director = None
-                try:
-                    credits_response = httpx.get(
-                        f"https://api.themoviedb.org/3/movie/{item['id']}/credits",
-                        params={"api_key": TMDB_API_KEY},
-                        timeout=3.0
-                    )
-                    if credits_response.status_code == 200:
-                        credits = credits_response.json()
-                        directors = [crew["name"] for crew in credits.get("crew", []) if crew.get("job") == "Director"]
-                        if directors:
-                            director = directors[0]
-                except:
-                    pass
 
                 movies.append({
                     "tmdb_id": item["id"],
-                    "title": item["title"],
-                    "year": year,
-                    "director": director,
+                    "title": item.get("title", ""),
+                    "year": y,
                     "poster_path": item.get("poster_path"),
                     "overview": item.get("overview", "")[:200] + "..." if item.get("overview") else ""
                 })
-            
-            print(f"  ✓ Found {len(movies)} movie results")
+
             return {"movies": movies, "total_found": len(results)}
-        
-        return {"movies": [], "error": f"API error: {response.status_code}"}
+
+        # First attempt: normalized title + year (if found)
+        result = _tmdb_search(title, year_hint)
+
+        # Fallback: if no hits and we had a year, try without year
+        if result.get("total_found", 0) == 0 and year_hint is not None:
+            result = _tmdb_search(title, None)
+
+        # Cache and return
+        search_movies._cache[cache_key] = result
+        print(f"  ✓ Found {len(result.get('movies', []))} movie results")
+        return result
+
     except Exception as e:
         return {"movies": [], "error": str(e)}
 
@@ -913,8 +943,8 @@ ACTOR QUERIES ("Leonardo DiCaprio movies"):
 6. add_to_stage(operation="discover", items=<array>)
 
 DIRECTOR QUERIES ("Christopher Nolan movies"):
-1. search_movies for the director's titles
-2. Filter results where director matches
+1. search_person → get person_id
+2. get_person_credits → filter to movies (exclude TV)
 3. get_all_movies → filter out owned titles
 4. Build items array with reasons
 5. add_to_stage(operation="discover", items=<array>)
@@ -925,6 +955,12 @@ THEME QUERIES ("sci-fi from the 90s"):
 3. get_all_movies/get_all_shows → filter out owned titles
 4. Build items array with reasons
 5. add_to_stage(operation="discover", items=<array>)
+
+TMDB SEARCH RULES:
+- When calling search_movies/search_shows, use simple queries: just the title, optionally the 4-digit year.
+- Do NOT include director names, actor names, or words like "film"/"movie" in the query.
+- Prefer format: "Title 2019" or just "Title". The backend will use the year as a hint when present.
+- If a query returns 0 results, try at most one alternate phrasing. Avoid spamming many similar calls.
 
 LIBRARY OPERATIONS:
 
@@ -1124,16 +1160,24 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "enum": ["discover", "add", "remove", "update", "queue"], "description": "Operation type: discover (recommendations), add (green), remove (red), update (blue), queue (instant)"},
+                    "operation": {
+                        "type": "string",
+                        "enum": ["discover", "add", "remove", "update", "queue"],
+                        "description": "Operation type: discover (recommendations), add (green), remove (red), update (blue), queue (instant)"
+                    },
                     "items": {
                         "type": "array",
                         "description": "Array of items with tmdb_id, media_type, and optional reason (for discover operations)",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "tmdb_id": {"type": "integer"},
                                 "media_type": {"type": "string", "enum": ["movie", "tv"]},
-                                "reason": {"type": "string", "description": "Why this item is recommended (for discover operations only)"}
+                                "reason": {
+                                    "type": ["string", "null"],
+                                    "description": "Why this item is recommended (for discover operations only)"
+                                }
                             },
                             "required": ["tmdb_id", "media_type"],
                             "additionalProperties": False
@@ -1143,7 +1187,7 @@ def get_unified_tools():
                 "required": ["operation", "items"],
                 "additionalProperties": False
             },
-            "strict": True
+            "strict": False
         }
     ]
 
@@ -1305,10 +1349,17 @@ async def chat(
         pending_commands = []  # Track commands to send to device
         stage_id = None  # Track if any tool returned a stage_id
         operation_type = None  # Track the operation type (discover, add, remove, etc.)
+        agent_start_time = time.time()
 
         while iteration < max_iterations:
             iteration += 1
             print(f"\n🔄 Iteration {iteration}")
+
+            if time.time() - agent_start_time > AGENT_TIMEOUT_SECONDS:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Agent timed out after {AGENT_TIMEOUT_SECONDS} seconds"
+                )
 
             response = openai_client.responses.create(
                 model="gpt-5-mini",
@@ -1398,7 +1449,10 @@ async def chat(
                     print(f"📤 Sending {len(pending_commands)} commands to device")
                 return response_data
 
-        raise HTTPException(status_code=500, detail="Request took too long")
+        raise HTTPException(
+            status_code=504,
+            detail=f"Agent timed out after {AGENT_TIMEOUT_SECONDS} seconds"
+        )
 
     except HTTPException:
         raise

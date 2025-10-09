@@ -325,6 +325,55 @@ def search_movies_in_library(query: str, device_id: str) -> Dict[str, Any]:
 # Removed search_media - dead code that violated zero-knowledge architecture
 
 # Function for Responses API
+def get_radarr_quality_profiles(device_id: str) -> Dict[str, Any]:
+    """Return cached Radarr quality profiles from the device library sync."""
+    print(f"🔧 TOOL CALLED: get_radarr_quality_profiles (device: {device_id[:8]}...)")
+
+    try:
+        result = supabase.table('library_cache').select('radarr_profiles, synced_at, is_syncing').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {"error": "Library not synced yet. Please sync Radarr first."}
+
+        cache = result.data[0]
+
+        if cache.get('is_syncing'):
+            return {"error": "Library sync in progress. Try again in a few seconds."}
+
+        profiles = cache.get('radarr_profiles') or []
+        print(f"  ✓ Retrieved {len(profiles)} Radarr profiles")
+        return {"profiles": profiles, "total": len(profiles)}
+
+    except Exception as exc:
+        print(f"  ✗ Error: {exc}")
+        return {"error": str(exc)}
+
+
+def get_sonarr_quality_profiles(device_id: str) -> Dict[str, Any]:
+    """Return cached Sonarr quality profiles from the device library sync."""
+    print(f"🔧 TOOL CALLED: get_sonarr_quality_profiles (device: {device_id[:8]}...)")
+
+    try:
+        result = supabase.table('library_cache').select('sonarr_profiles, synced_at, is_syncing').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {"error": "Library not synced yet. Please sync Sonarr first."}
+
+        cache = result.data[0]
+
+        if cache.get('is_syncing'):
+            return {"error": "Library sync in progress. Try again in a few seconds."}
+
+        profiles = cache.get('sonarr_profiles') or []
+        print(f"  ✓ Retrieved {len(profiles)} Sonarr profiles")
+        return {"profiles": profiles, "total": len(profiles)}
+
+    except Exception as exc:
+        print(f"  ✗ Error: {exc}")
+        return {"error": str(exc)}
+
+
+# Function for Responses API
 def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
     """Request episode details for a show from device - ZERO-KNOWLEDGE on-demand fetch!"""
     print(f"🔧 TOOL CALLED: get_show_episodes - Show: {show_title} (device: {device_id[:8]}...)")
@@ -833,7 +882,7 @@ def _load_library_show_map(device_id: Optional[str]) -> Dict[int, int]:
         return {}
 
 
-def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Dict[str, Any]:
+def add_to_stage(operation: str, items: List[Dict], device_id: str = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
@@ -846,6 +895,12 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         tmdb_id = item.get("tmdb_id")
         media_type = item.get("media_type", "movie")
         reason = item.get("reason")  # Optional reason for explore recommendations
+        source = item.get("source")
+        skip_tmdb = (
+            source == "library"
+            or item.get("skip_tmdb") is True
+            or item.get("skip_enrichment") is True
+        )
 
         if not tmdb_id:
             print(f"⚠️ Skipping item without tmdb_id: {item}")
@@ -855,17 +910,34 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
         tvdb_value = item.get("tvdb_id") or item.get("tvdbId")
         tvdb_int = _coerce_int(tvdb_value)
 
+        if skip_tmdb and operation != "explore":
+            year_val = _coerce_int(item.get("year")) or 0
+            processed_item = {
+                "tmdb_id": int(tmdb_id),
+                "title": item.get("title", "Unknown"),
+                "year": year_val,
+                "media_type": media_type,
+                "poster_path": item.get("poster_path", "") or "",
+                "verified": item.get("verified", True),
+                "tvdb_id": tvdb_int,
+            }
+            if reason:
+                processed_item["reason"] = reason
+            processed_items.append(processed_item)
+            print(f"⚡ Cached staging: {processed_item['title']} ({year_val}) without TMDB lookup")
+            continue
+
         # Fetch full data from TMDB
         try:
             endpoint = "movie" if media_type == "movie" else "tv"
             tmdb_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
-            params = {"api_key": TMDB_API_KEY}
+            request_params = {"api_key": TMDB_API_KEY}
             if media_type == "tv":
-                params["append_to_response"] = "external_ids"
+                request_params["append_to_response"] = "external_ids"
 
             response = httpx.get(
                 tmdb_url,
-                params=params,
+                params=request_params,
                 timeout=5.0
             )
 
@@ -976,7 +1048,8 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
             "ready_for_ui": True,
             "items": processed_items,
             "saved": True,
-            "message": f"Staged {len(processed_items)} items with stage_id: {stage_id}"
+            "message": f"Staged {len(processed_items)} items with stage_id: {stage_id}",
+            "params": params or {}
         }
     except Exception as e:
         # If Supabase fails, still return the staging info
@@ -988,7 +1061,8 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None) -> Di
             "ready_for_ui": True,
             "items": processed_items,
             "saved": False,
-            "error": str(e)
+            "error": str(e),
+            "params": params or {}
         }
 
 # Unified system prompt for both explore and library management
@@ -1019,6 +1093,9 @@ LIBRARY MANAGEMENT (add/remove/update):
 - "add all Christopher Nolan movies"
 → 1-3 items: add_to_queue(items=[...]) - instant execution
 → 4+ items: add_to_stage(operation="add/remove/update", items=[...]) - shows modal
+→ When staging items that already exist in the library, include title/year/profile/poster info from the cache, set media_type, and set "source": "library" to skip redundant TMDB lookups.
+→ Use get_radarr_quality_profiles / get_sonarr_quality_profiles to match user intent (e.g., “4K”, “1080p HDR”) to the correct profile id and name.
+→ For update operations, include params with target_quality_profile_id/name (and search_after_update when useful) so the device can apply the right profile automatically.
 
 WORKFLOWS:
 
@@ -1214,6 +1291,28 @@ def get_unified_tools():
         },
         {
             "type": "function",
+            "name": "get_radarr_quality_profiles",
+            "description": "Return cached Radarr quality profiles (id & name) for selecting target quality levels.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
+            "name": "get_sonarr_quality_profiles",
+            "description": "Return cached Sonarr quality profiles (id & name) for selecting target quality levels.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False
+            },
+            "strict": True
+        },
+        {
+            "type": "function",
             "name": "add_to_queue",
             "description": "Queue 1-3 items for instant execution on device. Device auto-executes without showing modal. Use for quick adds to library.",
             "parameters": {
@@ -1262,11 +1361,40 @@ def get_unified_tools():
                                 "reason": {
                                     "type": ["string", "null"],
                                     "description": "Why this item is recommended (for explore operations only)"
+                                },
+                                "title": {
+                                    "type": ["string", "null"],
+                                    "description": "Known title from the user's library cache"
+                                },
+                                "year": {
+                                    "type": ["integer", "null"],
+                                    "description": "Release year from the user's library cache"
+                                },
+                                "tvdb_id": {
+                                    "type": ["integer", "null"],
+                                    "description": "TVDB identifier (required for Sonarr operations on shows)"
+                                },
+                                "poster_path": {
+                                    "type": ["string", "null"],
+                                    "description": "Optional poster path or URL when available"
+                                },
+                                "source": {
+                                    "type": ["string", "null"],
+                                    "description": "Set to \"library\" to reuse cached metadata and skip TMDB lookups"
+                                },
+                                "verified": {
+                                    "type": ["boolean", "null"],
+                                    "description": "True if the item metadata came from the user's library cache"
                                 }
                             },
                             "required": ["tmdb_id", "media_type"],
                             "additionalProperties": False
                         }
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "Optional operation parameters (e.g., target_quality_profile_id/name for update flows)",
+                        "additionalProperties": True
                     }
                 },
                 "required": ["operation", "items"],
@@ -1291,7 +1419,12 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
         elif function_name == "get_person_credits":
             return get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
-            return add_to_stage(arguments["operation"], arguments["items"], device_id)
+            return add_to_stage(
+                arguments["operation"],
+                arguments["items"],
+                device_id,
+                arguments.get("params"),
+            )
         # Chat tools - all use library_cache, never call user servers!
         elif function_name == "get_library_stats":
             return get_library_stats(device_id)
@@ -1303,6 +1436,10 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
             return get_show_episodes(arguments["show_title"], device_id)
         elif function_name == "search_movies_in_library":
             return search_movies_in_library(arguments["query"], device_id)
+        elif function_name == "get_radarr_quality_profiles":
+            return get_radarr_quality_profiles(device_id)
+        elif function_name == "get_sonarr_quality_profiles":
+            return get_sonarr_quality_profiles(device_id)
         elif function_name == "add_to_queue":
             return add_to_queue(arguments["items"], device_id)
         else:

@@ -920,6 +920,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
                 "poster_path": item.get("poster_path", "") or "",
                 "verified": item.get("verified", True),
                 "tvdb_id": tvdb_int,
+                "overview": (item.get("overview") or "").strip(),
             }
             if reason:
                 processed_item["reason"] = reason
@@ -975,6 +976,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
                     "poster_path": tmdb_data.get("poster_path", ""),
                     "verified": True,  # Already verified if we got TMDB data
                     "tvdb_id": tvdb_int,
+                    "overview": (tmdb_data.get("overview") or "").strip(),
                 }
 
                 # Include reason if provided (for explore operations)
@@ -994,6 +996,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
                     "poster_path": "",
                     "verified": False,
                     "tvdb_id": tvdb_int,
+                    "overview": (item.get("overview") or "").strip(),
                 }
                 if reason:
                     basic_item["reason"] = reason
@@ -1009,6 +1012,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
                 "poster_path": "",
                 "verified": False,
                 "tvdb_id": tvdb_int,
+                "overview": (item.get("overview") or "").strip(),
             }
             if reason:
                 basic_item["reason"] = reason

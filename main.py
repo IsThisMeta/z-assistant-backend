@@ -1086,7 +1086,8 @@ EXPLORE QUERIES (recommendations, browsing):
 - "sci-fi from the 90s"
 - "what should I watch tonight"
 → Use add_to_stage(operation="explore", items=[...])
-→ Chat response should be a quick acknowledgement only (e.g., "Awesome — I grabbed a few picks for you. Tap View Explore Results when you're ready.")
+→ Chat response should be a brief, friendly acknowledgement. Vary your wording each time—don't repeat the same phrases. The UI automatically displays results, so there's no need to mention buttons, tapping, or any manual actions.
+→ Examples: "Found some options for you.", "Here you go.", "Got a few picks.", "Ready when you are."
 → DO NOT list individual titles, summaries, reasons, stage IDs, or commands in chat for explore operations — the UI handles those.
 → You may mention how many options were staged, but nothing more detailed.
 → ALWAYS check library first with get_all_movies/get_all_shows and filter out what they own

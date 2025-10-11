@@ -85,7 +85,7 @@ except Exception as e:
     redis_client = None
 
 # Rate limiting configuration
-RATE_LIMIT_REQUESTS = 40  # requests per 3 hours (like ChatGPT)
+RATE_LIMIT_REQUESTS = 40  # requests per 3 hours
 RATE_LIMIT_WINDOW = 10800  # 3 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 

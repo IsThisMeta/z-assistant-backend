@@ -84,9 +84,10 @@ except Exception as e:
     logger.error(f"⚠️  Failed to initialize Upstash Redis: {e}")
     redis_client = None
 
-# Rate limiting configuration
-RATE_LIMIT_REQUESTS = 40  # requests per 3 hours
-RATE_LIMIT_WINDOW = 10800  # 3 hours in seconds
+# Rate limiting configuration - Tier-based
+RATE_LIMIT_PRO_REQUESTS = 1  # Pro: 1 message per 12 hours
+RATE_LIMIT_MEGA_REQUESTS = 25  # Mega: 25 messages per 12 hours
+RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 
 class ChatRequest(BaseModel):
@@ -217,18 +218,45 @@ def decrypt_credentials(encrypted_data: dict, hmac_key: str) -> dict:
 
     return decrypted
 
-async def check_rate_limit(user_id: str):
-    """Check and enforce rate limits per user using Upstash Redis"""
+async def check_rate_limit(device_id: str):
+    """Check and enforce tier-based rate limits per device using Upstash Redis"""
     if not redis_client:
         # Redis not available - skip rate limiting (dev mode)
-        print(f"⚠️  Rate limiting skipped for {user_id} (Redis not configured)")
+        print(f"⚠️  Rate limiting skipped for {device_id[:8]}... (Redis not configured)")
         return
 
+    # Get subscription tier for this device
+    try:
+        result = supabase.rpc('get_device_subscription_tier', params={'p_device_id': device_id}).execute()
+        tier = result.data if result.data else None
+
+        # Determine rate limit based on tier
+        if tier == 'mega':
+            limit = RATE_LIMIT_MEGA_REQUESTS
+            tier_name = "Mega (25 messages/12 hours)"
+        elif tier == 'pro':
+            limit = RATE_LIMIT_PRO_REQUESTS
+            tier_name = "Pro (1 message/12 hours)"
+        else:
+            # No active subscription - shouldn't happen as auth checks this
+            raise HTTPException(
+                status_code=403,
+                detail="No active Pro or Mega subscription found"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get subscription tier for device {device_id[:8]}...: {e}")
+        # Default to Pro tier on error (more restrictive)
+        limit = RATE_LIMIT_PRO_REQUESTS
+        tier_name = "Pro (fallback)"
+
     # Use Redis sorted set for time-based rate limiting
-    # Key format: ratelimit:{user_id}
+    # Key format: ratelimit:{device_id}
     # Score: timestamp
     # Value: unique request ID
-    key = f"ratelimit:{user_id}"
+    key = f"ratelimit:{device_id}"
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
 
@@ -240,16 +268,20 @@ async def check_rate_limit(user_id: str):
         count = redis_client.zcard(key)
 
         # Check if limit exceeded
-        if count >= RATE_LIMIT_REQUESTS:
+        if count >= limit:
             # Get the oldest request timestamp
             oldest = redis_client.zrange(key, 0, 0, withscores=True)
             if oldest:
                 oldest_time = oldest[0][1]
                 retry_after = int(oldest_time + RATE_LIMIT_WINDOW - now)
+                hours = retry_after // 3600
+                minutes = (retry_after % 3600) // 60
+
+                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
                 raise HTTPException(
                     status_code=429,
-                    detail=f"Rate limit exceeded. Try again in {retry_after} seconds.",
+                    detail=f"Rate limit exceeded for {tier_name}. Try again in {time_str}.",
                     headers={"Retry-After": str(retry_after)}
                 )
 
@@ -260,14 +292,14 @@ async def check_rate_limit(user_id: str):
         # Set expiry on the key (cleanup after window expires)
         redis_client.expire(key, RATE_LIMIT_WINDOW)
 
-        print(f"✅ Rate limit check passed for {user_id}: {count + 1}/{RATE_LIMIT_REQUESTS}")
+        print(f"✅ Rate limit check passed for {device_id[:8]}... [{tier_name}]: {count + 1}/{limit}")
 
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
     except Exception as e:
         # Redis error - log but don't block request
-        print(f"⚠️  Rate limit check failed for {user_id}: {e}")
+        print(f"⚠️  Rate limit check failed for {device_id[:8]}...: {e}")
         # Continue without rate limiting on Redis errors
 
 def validate_url(url: str) -> bool:
@@ -1456,6 +1488,7 @@ class DeviceRegisterRequest(BaseModel):
     device_id: str
     hmac_key: str
     receipt_token: str  # RevenueCat purchase token for verification
+    user_id: Optional[str] = None  # Supabase user ID for tier-based rate limiting
 
 @app.post("/device/register")
 async def register_device(request: DeviceRegisterRequest):
@@ -1529,22 +1562,30 @@ async def register_device(request: DeviceRegisterRequest):
         existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()
 
         if existing.data:
-            # Update existing device's HMAC key
-            supabase.table('device_keys').update({
+            # Update existing device's HMAC key and user_id (if provided)
+            update_data = {
                 'hmac_key': request.hmac_key,
                 'last_used': datetime.now().isoformat()
-            }).eq('device_id', device_id).execute()
+            }
+            if request.user_id:
+                update_data['user_id'] = request.user_id
+
+            supabase.table('device_keys').update(update_data).eq('device_id', device_id).execute()
 
             logger.info(f"🔄 Updated HMAC key for device {device_id[:8]}...")
         else:
             # Register new device
-            supabase.table('device_keys').insert({
+            insert_data = {
                 'device_id': device_id,
                 'hmac_key': request.hmac_key,
                 'created_at': datetime.now().isoformat(),
                 'last_used': datetime.now().isoformat(),
                 'request_count': 0
-            }).execute()
+            }
+            if request.user_id:
+                insert_data['user_id'] = request.user_id
+
+            supabase.table('device_keys').insert(insert_data).execute()
 
             logger.info(f"✅ Registered new device {device_id[:8]}...")
 

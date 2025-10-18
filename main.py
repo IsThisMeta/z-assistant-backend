@@ -85,8 +85,8 @@ except Exception as e:
     redis_client = None
 
 # Rate limiting configuration - Tier-based
-RATE_LIMIT_PRO_REQUESTS = 1  # Pro: 1 message per 12 hours
-RATE_LIMIT_MEGA_REQUESTS = 25  # Mega: 25 messages per 12 hours
+RATE_LIMIT_PRO_REQUESTS = 3  # Pro: 3 messages per 12 hours
+RATE_LIMIT_MEGA_REQUESTS = 15  # Mega: 15 messages per 12 hours
 RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 
@@ -233,10 +233,10 @@ async def check_rate_limit(device_id: str):
         # Determine rate limit based on tier
         if tier == 'mega':
             limit = RATE_LIMIT_MEGA_REQUESTS
-            tier_name = "Mega (25 messages/12 hours)"
+            tier_name = "Mega (15 messages/12 hours)"
         elif tier == 'pro':
             limit = RATE_LIMIT_PRO_REQUESTS
-            tier_name = "Pro (1 message/12 hours)"
+            tier_name = "Pro (3 messages/12 hours)"
         else:
             # No active subscription - shouldn't happen as auth checks this
             raise HTTPException(

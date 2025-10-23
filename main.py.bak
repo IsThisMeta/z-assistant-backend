@@ -1593,7 +1593,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -1605,7 +1604,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -1701,7 +1699,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -1713,7 +1710,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -1725,7 +1721,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -1765,7 +1760,6 @@ def get_unified_tools():
             "parameters": {
                 "type": "object",
                 "properties": {},
-                "required": [],
                 "additionalProperties": False
             },
             "strict": True

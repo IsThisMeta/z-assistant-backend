@@ -90,6 +90,161 @@ RATE_LIMIT_MEGA_REQUESTS = 15  # Mega: 15 messages per 12 hours
 RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 
+# ====== GIGACHAD RELEVANCE RANKING ======
+# Port of the sophisticated Flutter search ranking algorithm
+import math
+
+def normalize_text(text: str) -> str:
+    """Normalize text for comparison"""
+    return re.sub(r'\s+', ' ', re.sub(r'[^a-z0-9]+', ' ', text.lower())).strip()
+
+def strip_leading_articles(text: str) -> str:
+    """Remove leading articles (the, a, an)"""
+    for article in ['the ', 'a ', 'an ']:
+        if text.startswith(article):
+            return text[len(article):]
+    return text
+
+def singularize(token: str) -> str:
+    """Convert plural tokens to singular"""
+    if len(token) <= 3:
+        return token
+    if token.endswith('ies'):
+        return token[:-3] + 'y'
+    if token.endswith('ves'):
+        return token[:-3] + 'f'
+    if token.endswith('es') and not token.endswith('ses'):
+        return token[:-2]
+    if token.endswith('s') and not token.endswith('ss'):
+        return token[:-1]
+    return token
+
+def tokenize(text: str) -> set:
+    """Tokenize and singularize text"""
+    normalized = normalize_text(text)
+    if not normalized:
+        return set()
+    return {singularize(token) for token in normalized.split() if token}
+
+def compute_match_score(item: dict, query: str) -> float:
+    """Compute text match relevance (0-1 scale)"""
+    title = str(item.get('title') or item.get('name') or item.get('original_title') or item.get('original_name') or '')
+    normalized_title = normalize_text(title)
+    normalized_query = normalize_text(query)
+
+    if not normalized_title or not normalized_query:
+        return 0.45
+
+    stripped_title = strip_leading_articles(normalized_title)
+    stripped_query = strip_leading_articles(normalized_query)
+
+    # Exact match
+    if normalized_title == normalized_query or stripped_title == stripped_query:
+        return 1.0
+
+    # Starts with (stripped)
+    if stripped_title.startswith(stripped_query + ' '):
+        return 0.96
+
+    # Starts with
+    if normalized_title.startswith(normalized_query + ' '):
+        return 0.94
+
+    # Token matching
+    title_tokens = tokenize(title)
+    query_tokens = tokenize(query)
+
+    if query_tokens and title_tokens:
+        intersection = query_tokens & title_tokens
+        if intersection:
+            if len(intersection) == len(query_tokens):
+                return 0.92 if len(title_tokens) == len(query_tokens) else 0.88
+            coverage = len(intersection) / len(query_tokens)
+            if coverage >= 0.6:
+                return 0.8
+            return 0.68
+
+    # Contains
+    if normalized_query in normalized_title:
+        return 0.65
+
+    return 0.45
+
+def media_priority(item: dict) -> float:
+    """Priority score by media type"""
+    media_type = item.get('media_type', '')
+    if media_type in ['movie', 'tv']:
+        return 1.0
+    if media_type == 'collection':
+        return 0.8
+    if media_type == 'person':
+        return 0.5
+    return 0.4
+
+def rank_search_results(results: list, query: str) -> list:
+    """Apply gigachad relevance ranking to search results"""
+    if not results:
+        return results
+
+    # Calculate max values for normalization
+    max_popularity = max((r.get('popularity', 0) for r in results), default=0)
+    max_vote_log = max((math.log((r.get('vote_count', 0) or 0) + 1) for r in results), default=0)
+
+    # Extract years for recency scoring
+    def extract_year(item):
+        date_str = item.get('release_date') or item.get('first_air_date')
+        if date_str:
+            try:
+                return int(date_str.split('-')[0])
+            except:
+                pass
+        return None
+
+    years = [y for y in (extract_year(r) for r in results) if y is not None]
+    min_year = min(years) if years else None
+    max_year = max(years) if years else None
+
+    def compute_year_score(year):
+        if year is None or min_year is None or max_year is None or min_year == max_year:
+            return 0.5
+        normalized = (year - min_year) / (max_year - min_year)
+        return max(0, min(1, normalized))
+
+    def compute_score(item):
+        popularity = item.get('popularity', 0) or 0
+        votes = item.get('vote_count', 0) or 0
+
+        pop_score = (popularity / max_popularity) if max_popularity > 0 else 0.0
+        vote_score = (math.log(votes + 1) / max_vote_log) if max_vote_log > 0 else 0.0
+        match_score = compute_match_score(item, query)
+        year_score = compute_year_score(extract_year(item))
+        media_score = media_priority(item)
+
+        # Weighted combination (matches Flutter exactly)
+        return (
+            (media_score * 40) +
+            (match_score * 50) +
+            (vote_score * 25) +
+            (pop_score * 15) +
+            (year_score * 5)
+        )
+
+    # Sort by computed score (descending)
+    indexed_results = [(i, r) for i, r in enumerate(results)]
+    indexed_results.sort(key=lambda x: (
+        -compute_score(x[1]),  # Primary: score
+        -media_priority(x[1]),  # Secondary: media type
+        -compute_match_score(x[1], query),  # Tertiary: match
+        -(x[1].get('popularity', 0) or 0),  # Quaternary: popularity
+        -(x[1].get('vote_count', 0) or 0),  # Quinary: votes
+        -(extract_year(x[1]) or -1),  # Senary: recency
+        x[0]  # Original order as tiebreaker
+    ))
+
+    return [r for _, r in indexed_results]
+
+# ====== END GIGACHAD RANKING ======
+
 class ChatRequest(BaseModel):
     message: str
     context: Optional[str] = None  # Optional context like "explore"
@@ -585,13 +740,19 @@ The obscurity_score (1-10) indicates how "deep cut" it is:
 
 Base your recommendations on their watch history patterns and library genres."""
 
-def generate_deep_cuts(device_id: str) -> Dict[str, Any]:
-    """Generate AI-powered hidden gem movie recommendations for Ultra users.
+def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered hidden gem movie recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
-    Analyzes library + watch history to find personalized deep cuts."""
+    Analyzes library + watch history to find personalized deep cuts.
+
+    Args:
+        device_id: Device identifier
+        subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5)
+    """
 
     print(f"\n🎬 DEEP CUTS GENERATION STARTED for device {device_id[:8]}...")
+    print(f"  → Subscription tier: {subscription_tier.upper()}")
     start_time = time.time()
 
     try:
@@ -677,30 +838,89 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         print("  → Calling OpenAI for deep cuts generation...")
         print(f"  → Context length: {len(context)} chars")
 
-        # Call OpenAI with specialized deep cuts prompt (using GPT-5 for Ultra tier)
-        response = openai_client.chat.completions.create(
-            model="gpt-5",
-            messages=[
-                {"role": "system", "content": DEEP_CUTS_PROMPT},
-                {"role": "user", "content": context}
-            ],
-            response_format={ "type": "json_object" },
-            temperature=0.8,  # Higher creativity for varied recommendations
-            max_tokens=2000
+        # Select model based on subscription tier
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        print(f"  → Using model: {model}")
+
+        # Call OpenAI with Responses API (required for GPT-5)
+        # Note: GPT-5 models use Responses API, not Chat Completions
+        response = openai_client.responses.create(
+            model=model,
+            instructions=DEEP_CUTS_PROMPT,  # System prompt goes in instructions
+            input=context,  # User content goes in input
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "deep_cuts_recommendations",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "director": {"type": ["string", "null"]},
+                                        "genres": {
+                                            "type": "array",
+                                            "items": {"type": "string"}
+                                        },
+                                        "reason": {"type": "string"},
+                                        "obscurity_score": {"type": "integer"}
+                                    },
+                                    "required": ["title", "year", "director", "genres", "reason", "obscurity_score"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=2000  # Responses API uses max_output_tokens
         )
 
-        result_text = response.choices[0].message.content
-        print(f"  ✓ Got AI response ({len(result_text)} chars)")
+        # Extract structured JSON from Responses API output
+        # Response structure: response.output[0].content[0].text contains the JSON
+        print(f"  → Response output items: {len(response.output)}")
+        print(f"  → Full response dump for debugging:")
+        print(response.model_dump_json(indent=2))
 
-        # Parse JSON response
-        try:
-            recommendations_data = json.loads(result_text)
-            recommendations = recommendations_data.get('recommendations', [])
-            print(f"  ✓ Parsed {len(recommendations)} recommendations")
-        except json.JSONDecodeError as e:
-            print(f"  ❌ Failed to parse JSON: {e}")
-            print(f"  Raw response: {result_text[:500]}...")
-            raise
+        # Get the text from the first message's first content item
+        recommendations = []
+        if response.output and len(response.output) > 0:
+            first_message = response.output[0]
+            print(f"  → First message type: {first_message.type}")
+
+            if hasattr(first_message, 'content') and first_message.content:
+                first_content = first_message.content[0]
+                print(f"  → First content type: {first_content.type}")
+
+                # Get the text - could be in 'text' attribute
+                result_text = None
+                if hasattr(first_content, 'text'):
+                    result_text = first_content.text
+
+                if result_text:
+                    print(f"  ✓ Got AI response ({len(result_text)} chars)")
+                    try:
+                        recommendations_data = json.loads(result_text)
+                        recommendations = recommendations_data.get('recommendations', [])
+                        print(f"  ✓ Parsed {len(recommendations)} recommendations")
+                    except json.JSONDecodeError as e:
+                        print(f"  ❌ Failed to parse JSON: {e}")
+                        print(f"  Raw response text: {result_text}")
+                        raise
+                else:
+                    print(f"  ❌ No text found in content item")
+
+        if not recommendations:
+            print(f"  ❌ No recommendations found in response")
+            raise ValueError("No recommendations found in OpenAI response")
 
         # Filter out movies already in library
         library_titles = {m.get('title', '').lower() for m in movies_in_library}
@@ -1040,8 +1260,15 @@ def search_movies(query: str) -> Dict[str, Any]:
 
             results = resp.json().get("results", [])
 
+            # Add media_type for ranking
+            for item in results:
+                item['media_type'] = 'movie'
+
+            # Apply gigachad relevance ranking
+            ranked_results = rank_search_results(results, q)
+
             movies = []
-            for item in results[:5]:
+            for item in ranked_results[:5]:
                 y = None
                 if item.get("release_date"):
                     try:
@@ -1117,7 +1344,7 @@ def search_shows(query: str) -> Dict[str, Any]:
 
 # Function for Responses API
 def search_person(query: str) -> Dict[str, Any]:
-    """Search for people (actors, directors, etc.) on TMDB"""
+    """Search for people (actors, directors, etc.) on TMDB with gigachad relevance ranking"""
     print(f"🔧 TOOL CALLED: search_person - Query: {query}")
 
     try:
@@ -1132,9 +1359,19 @@ def search_person(query: str) -> Dict[str, Any]:
         if response.status_code == 200:
             results = response.json().get("results", [])
 
+            # Add media_type for ranking and normalize structure
+            for item in results:
+                item['media_type'] = 'person'
+                # TMDB uses 'name' for people, but ranking expects 'title' or 'name'
+                if 'name' in item:
+                    item['title'] = item['name']  # Add for compatibility
+
+            # Apply gigachad relevance ranking
+            ranked_results = rank_search_results(results, query)
+
             # Return top 5 results with relevant info
             people = []
-            for item in results[:5]:
+            for item in ranked_results[:5]:
                 people.append({
                     "person_id": item["id"],
                     "name": item["name"],
@@ -1143,7 +1380,7 @@ def search_person(query: str) -> Dict[str, Any]:
                     "popularity": item.get("popularity", 0)
                 })
 
-            print(f"  ✓ Found {len(people)} people")
+            print(f"  ✓ Found {len(people)} people (ranked)")
             return {"people": people, "total_found": len(results)}
 
         return {"people": [], "error": f"API error: {response.status_code}"}
@@ -1274,7 +1511,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
 
     for item in items:
         # Just need the basics from AI
-        tmdb_id = item.get("tmdb_id")
+        tmdb_id = item.get("tmdb_id") or item.get("person_id")  # person_id for people
         media_type = item.get("media_type", "movie")
         reason = item.get("reason")  # Optional reason for explore recommendations
         source = item.get("source")
@@ -1285,7 +1522,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
         )
 
         if not tmdb_id:
-            print(f"⚠️ Skipping item without tmdb_id: {item}")
+            print(f"⚠️ Skipping item without tmdb_id/person_id: {item}")
             continue
 
         # Track optional IDs the frontend may need (e.g., TVDB for Sonarr)
@@ -1312,6 +1549,48 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
 
         # Fetch full data from TMDB
         try:
+            # Handle people differently
+            if media_type == "person":
+                tmdb_url = f"https://api.themoviedb.org/3/person/{tmdb_id}"
+                request_params = {"api_key": TMDB_API_KEY}
+
+                response = httpx.get(tmdb_url, params=request_params, timeout=5.0)
+
+                if response.status_code == 200:
+                    person_data = response.json()
+
+                    processed_item = {
+                        "person_id": int(tmdb_id),
+                        "name": person_data.get("name", "Unknown"),
+                        "media_type": "person",
+                        "profile_path": person_data.get("profile_path", ""),
+                        "known_for_department": person_data.get("known_for_department", ""),
+                        "popularity": person_data.get("popularity", 0),
+                        "verified": True
+                    }
+
+                    if reason:
+                        processed_item["reason"] = reason
+
+                    processed_items.append(processed_item)
+                    print(f"✅ Enriched person: {processed_item['name']} ({processed_item['known_for_department']})")
+                else:
+                    print(f"❌ TMDB API error for person {tmdb_id}: {response.status_code}")
+                    basic_item = {
+                        "person_id": int(tmdb_id),
+                        "name": item.get("name", "Unknown"),
+                        "media_type": "person",
+                        "profile_path": "",
+                        "known_for_department": item.get("known_for_department", ""),
+                        "popularity": 0,
+                        "verified": False
+                    }
+                    if reason:
+                        basic_item["reason"] = reason
+                    processed_items.append(basic_item)
+                continue  # Skip the movie/tv logic below
+
+            # Movie/TV logic
             endpoint = "movie" if media_type == "movie" else "tv"
             tmdb_url = f"https://api.themoviedb.org/3/{endpoint}/{tmdb_id}"
             request_params = {"api_key": TMDB_API_KEY}
@@ -1627,7 +1906,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_movies",
-            "description": "Search for movies on TMDB. Returns director information and full details.",
+            "description": "Search for movies on TMDB with relevance ranking. Results ranked by text match, popularity, and votes. If specific search fails, try broader terms (remove year, partial title, etc).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1641,7 +1920,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_shows",
-            "description": "Search for TV shows on TMDB",
+            "description": "Search for TV shows on TMDB with relevance ranking. If specific search fails, try broader terms.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1655,7 +1934,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_person",
-            "description": "Search for people (actors, directors, etc.) on TMDB to get their ID",
+            "description": "Search for people (actors, directors, etc.) on TMDB with relevance ranking. Last names alone work well (e.g., 'Nolan' finds Christopher Nolan). If full name fails, try last name only.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1773,18 +2052,18 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "add_to_queue",
-            "description": "Queue 1-3 items for instant execution on device. Device auto-executes without showing modal. Use for quick adds to library.",
+            "description": "Queue 1-3 items (movies, shows, or people) for instant display on device. Device shows them immediately. Use to show search results.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "items": {
                         "type": "array",
-                        "description": "Array of 1-3 items with tmdb_id and media_type",
+                        "description": "Array of 1-3 items with tmdb_id/person_id and media_type (movie, tv, or person)",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "tmdb_id": {"type": "integer"},
-                                "media_type": {"type": "string", "enum": ["movie", "tv"]}
+                                "media_type": {"type": "string", "enum": ["movie", "tv", "person"]}
                             },
                             "required": ["tmdb_id", "media_type"],
                             "additionalProperties": False
@@ -1810,13 +2089,13 @@ def get_unified_tools():
                     },
                     "items": {
                         "type": "array",
-                        "description": "Array of items with tmdb_id, media_type, and optional reason (for explore operations)",
+                        "description": "Array of items with tmdb_id, media_type (movie/tv/person), and optional reason (for explore operations)",
                         "minItems": 1,
                         "items": {
                             "type": "object",
                             "properties": {
                                 "tmdb_id": {"type": "integer"},
-                                "media_type": {"type": "string", "enum": ["movie", "tv"]},
+                                "media_type": {"type": "string", "enum": ["movie", "tv", "person"]},
                                 "reason": {
                                     "type": ["string", "null"],
                                     "description": "Why this item is recommended (for explore operations only)"
@@ -2236,20 +2515,23 @@ async def chat(
 
 @app.post("/deep-cuts/generate")
 async def generate_deep_cuts_endpoint(
-    device_auth: tuple[str, str] = Depends(verify_device_subscription)
+    device_auth: tuple[str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
 ):
-    """Generate AI-powered deep cuts recommendations for Ultra users.
+    """Generate AI-powered deep cuts recommendations for Mega/Ultra users.
 
     This endpoint triggers weekly deep cuts generation based on library + watch history.
-    Only Ultra subscribers should call this endpoint (enforced on device side)."""
+    Mega users get gpt-5-mini, Ultra users get gpt-5."""
 
     device_id, hmac_key = device_auth
+    subscription_tier = x_subscription_tier.lower()
 
     try:
         print(f"🎬 Deep Cuts generation requested for device {device_id[:8]}...")
+        print(f"  → Tier: {subscription_tier.upper()}")
 
         # Generate deep cuts (function handles rate limiting internally)
-        result = generate_deep_cuts(device_id)
+        result = generate_deep_cuts(device_id, subscription_tier)
 
         if "error" in result:
             # Return appropriate status code based on error

@@ -881,45 +881,38 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
                     }
                 }
             },
-            max_output_tokens=2000  # Responses API uses max_output_tokens
+            max_output_tokens=8000  # GPT-5 uses ~2k tokens for reasoning, need room for output
         )
 
         # Extract structured JSON from Responses API output
-        # Response structure: response.output[0].content[0].text contains the JSON
+        # Response has 2 items: reasoning (type="reasoning") and message (type="message")
+        # We need the message item which contains the actual JSON
         print(f"  → Response output items: {len(response.output)}")
-        print(f"  → Full response dump for debugging:")
-        print(response.model_dump_json(indent=2))
 
-        # Get the text from the first message's first content item
+        # Find the message item (not reasoning)
         recommendations = []
-        if response.output and len(response.output) > 0:
-            first_message = response.output[0]
-            print(f"  → First message type: {first_message.type}")
-
-            if hasattr(first_message, 'content') and first_message.content:
-                first_content = first_message.content[0]
-                print(f"  → First content type: {first_content.type}")
-
-                # Get the text - could be in 'text' attribute
-                result_text = None
-                if hasattr(first_content, 'text'):
-                    result_text = first_content.text
-
-                if result_text:
-                    print(f"  ✓ Got AI response ({len(result_text)} chars)")
-                    try:
-                        recommendations_data = json.loads(result_text)
-                        recommendations = recommendations_data.get('recommendations', [])
-                        print(f"  ✓ Parsed {len(recommendations)} recommendations")
-                    except json.JSONDecodeError as e:
-                        print(f"  ❌ Failed to parse JSON: {e}")
-                        print(f"  Raw response text: {result_text}")
-                        raise
-                else:
-                    print(f"  ❌ No text found in content item")
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                # Found the message with our recommendations
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_text = content_item.text
+                        print(f"  ✓ Got AI response ({len(result_text)} chars)")
+                        try:
+                            recommendations_data = json.loads(result_text)
+                            recommendations = recommendations_data.get('recommendations', [])
+                            print(f"  ✓ Parsed {len(recommendations)} recommendations")
+                            break
+                        except json.JSONDecodeError as e:
+                            print(f"  ❌ Failed to parse JSON: {e}")
+                            print(f"  Raw response text: {result_text}")
+                            raise
+                break
 
         if not recommendations:
             print(f"  ❌ No recommendations found in response")
+            print(f"  Full response dump:")
+            print(response.model_dump_json(indent=2))
             raise ValueError("No recommendations found in OpenAI response")
 
         # Filter out movies already in library

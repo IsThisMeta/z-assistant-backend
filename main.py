@@ -925,6 +925,52 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
 
         print(f"  ✓ Filtered to {len(filtered_recs)} unique deep cuts")
 
+        # Enrich with TMDB data (poster_path, tmdb_id)
+        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data...")
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                title = rec.get('title', '')
+                year = rec.get('year')
+
+                # Search TMDB for this movie
+                search_url = "https://api.themoviedb.org/3/search/movie"
+                params = {
+                    "api_key": TMDB_API_KEY,
+                    "query": title,
+                    "include_adult": False
+                }
+                if year:
+                    params["year"] = year
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200:
+                    results = response.json().get("results", [])
+                    if results:
+                        # Take the first result (most relevant)
+                        movie = results[0]
+                        rec['tmdb_id'] = movie.get('id')
+                        rec['poster_path'] = movie.get('poster_path', '')
+                        print(f"    ✓ {title} ({year}): poster={rec['poster_path']}")
+                    else:
+                        rec['tmdb_id'] = None
+                        rec['poster_path'] = ''
+                        print(f"    ⚠ {title} ({year}): No TMDB match")
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                    print(f"    ❌ {title} ({year}): TMDB API error {response.status_code}")
+
+                enriched_recs.append(rec)
+            except Exception as e:
+                print(f"    ❌ Error enriching {rec.get('title')}: {e}")
+                # Add without TMDB data
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        print(f"  ✓ Enriched {len(enriched_recs)} recommendations with TMDB data")
+
         # Calculate generation duration
         duration_ms = int((time.time() - start_time) * 1000)
 
@@ -932,7 +978,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         next_gen = datetime.now() + timedelta(days=7)
         supabase.table('deep_cuts_cache').upsert({
             'device_id': device_id,
-            'recommendations': filtered_recs,
+            'recommendations': enriched_recs,
             'generated_at': datetime.now().isoformat(),
             'is_generating': False,
             'next_generation_at': next_gen.isoformat(),

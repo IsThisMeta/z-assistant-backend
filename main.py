@@ -6,7 +6,7 @@ import os
 from typing import Dict, Any, List, Optional
 import uuid
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -2261,6 +2261,8 @@ async def register_device(request: DeviceRegisterRequest):
         if not request.receipt_token:
             raise HTTPException(status_code=403, detail="Receipt token required")
 
+        tier_expiry: Optional[datetime] = None
+
         # DEVELOPMENT MODE: Skip verification for anonymous IDs (simulator/testing)
         if request.receipt_token.startswith("$RCAnonymousID:"):
             logger.warning(f"⚠️  DEV MODE: Bypassing RevenueCat verification for anonymous user")
@@ -2380,8 +2382,8 @@ async def register_device(request: DeviceRegisterRequest):
                     'subscription_type': active_tier,
                     'status': 'active',
                     'product_id': product_lookup.get(active_tier, 'Pro'),
-                    'expires_at': tier_expiry.isoformat() if tier_expiry else (datetime.now() + timedelta(days=365)).isoformat(),
-                    'updated_at': datetime.now().isoformat()
+                    'expires_at': tier_expiry.isoformat() if tier_expiry else (datetime.now(timezone.utc) + timedelta(days=365)).isoformat(),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
                 }
 
                 supabase.table('subscriptions').upsert(

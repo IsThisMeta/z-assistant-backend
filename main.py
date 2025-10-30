@@ -2282,7 +2282,12 @@ async def register_device(request: DeviceRegisterRequest):
             )
 
             if rc_response.status_code != 200:
-                logger.warning(f"RevenueCat verification failed: {rc_response.status_code}")
+                body_preview = rc_response.text[:300] if rc_response.text else '<empty>'
+                logger.warning(
+                    "RevenueCat verification failed: %s body=%s",
+                    rc_response.status_code,
+                    body_preview
+                )
                 raise HTTPException(status_code=403, detail="Invalid subscription")
 
             subscriber_data = rc_response.json()

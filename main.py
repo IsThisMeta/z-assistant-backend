@@ -2251,6 +2251,13 @@ async def register_device(request: DeviceRegisterRequest):
         device_id = str(device_uuid)
         active_tier: Optional[str] = None
 
+        logger.info(
+            "📥 Device registration request: device=%s user_id=%s tier=%s",
+            device_id[:8],
+            request.user_id[:8] if request.user_id else "None",
+            request.subscription_tier or "unspecified"
+        )
+
         # Verify Mega subscription with RevenueCat
         logger.info(f"🎫 Verifying RevenueCat subscription for device {device_id[:8]}...")
 
@@ -2364,6 +2371,13 @@ async def register_device(request: DeviceRegisterRequest):
         # Upsert subscription to Supabase if we have user_id and verified tier
         if request.user_id and active_tier:
             try:
+                logger.info(
+                    "📝 Syncing subscription: user=%s tier=%s expiry=%s",
+                    request.user_id[:8],
+                    active_tier,
+                    tier_expiry.isoformat() if tier_expiry else "no_expiry"
+                )
+
                 product_lookup = {
                     "ultra": "Ultra",
                     "mega": "Mega",
@@ -2380,8 +2394,13 @@ async def register_device(request: DeviceRegisterRequest):
                 }
 
                 # Ensure one row per user: delete any stale rows then insert fresh
-                supabase.table('subscriptions').delete().eq('user_id', request.user_id).execute()
-                supabase.table('subscriptions').insert(subscription_data).execute()
+                logger.info(f"🗑️  Deleting old subscriptions for user {request.user_id[:8]}")
+                delete_result = supabase.table('subscriptions').delete().eq('user_id', request.user_id).execute()
+                logger.info(f"✏️  Deleted {len(delete_result.data) if delete_result.data else 0} old rows")
+
+                logger.info(f"➕ Inserting new subscription row for user {request.user_id[:8]}")
+                insert_result = supabase.table('subscriptions').insert(subscription_data).execute()
+                logger.info(f"✅ Insert result: {len(insert_result.data) if insert_result.data else 0} rows inserted")
 
                 logger.info(
                     "💾 Synced %s subscription to Supabase for user %s",
@@ -2389,8 +2408,17 @@ async def register_device(request: DeviceRegisterRequest):
                     request.user_id[:8],
                 )
             except Exception as e:
-                logger.warning(f"Failed to sync subscription to Supabase: {e}")
+                logger.error(f"❌ Failed to sync subscription to Supabase: {e}")
+                logger.error(f"   Subscription data: {subscription_data if 'subscription_data' in locals() else 'not created'}")
+                import traceback
+                logger.error(traceback.format_exc())
                 # Don't fail registration if subscription sync fails
+        else:
+            logger.warning(
+                "⚠️  Skipping subscription sync: user_id=%s active_tier=%s",
+                request.user_id[:8] if request.user_id else "None",
+                active_tier or "None"
+            )
 
         # Check if device already exists
         existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()

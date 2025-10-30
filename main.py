@@ -69,7 +69,7 @@ if not TMDB_API_KEY:
     raise RuntimeError("TMDB_API_KEY environment variable is required")
 REVENUECAT_SECRET_KEY = os.getenv("REVENUECAT_SECRET_KEY")
 
-# Initialize Upstash Redis for distributed rate limiting
+# Initialize Upstash Redis for caching and rate limiting
 redis_client = None
 try:
     upstash_url = os.getenv("UPSTASH_REDIS_REST_URL")
@@ -77,12 +77,15 @@ try:
 
     if upstash_url and upstash_token:
         redis_client = Redis(url=upstash_url, token=upstash_token)
-        logger.info("✅ Upstash Redis initialized for rate limiting")
+        logger.info("✅ Upstash Redis initialized for caching and rate limiting")
     else:
-        logger.warning("⚠️  Upstash credentials not found - rate limiting disabled")
+        logger.warning("⚠️  Upstash credentials not found - caching and rate limiting disabled")
 except Exception as e:
     logger.error(f"⚠️  Failed to initialize Upstash Redis: {e}")
     redis_client = None
+
+# RevenueCat cache TTL (6 hours = 21600 seconds)
+RC_CACHE_TTL = 21600
 
 # Rate limiting configuration - Tier-based
 RATE_LIMIT_PRO_REQUESTS = 3  # Pro: 3 messages per 12 hours
@@ -298,8 +301,8 @@ async def verify_mega_subscription(authorization: str = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Authentication failed")
 
 # Device-based authentication with HMAC
-async def verify_device_subscription(x_device_id: str = Header(None)) -> tuple[str, str]:
-    """Verify device has active Mega subscription and return (device_id, hmac_key)"""
+async def verify_device_subscription(x_device_id: str = Header(None)) -> tuple[str, str, str]:
+    """Verify device has active subscription and return (device_id, hmac_key, rc_customer_id)"""
     if not x_device_id:
         raise HTTPException(status_code=401, detail="X-Device-Id header required")
 
@@ -309,19 +312,23 @@ async def verify_device_subscription(x_device_id: str = Header(None)) -> tuple[s
         device_id = str(device_uuid)
 
         # Look up device in database
-        result = supabase.table('device_keys').select('hmac_key').eq('device_id', device_id).execute()
+        result = supabase.table('device_keys').select('hmac_key, rc_customer_id').eq('device_id', device_id).execute()
 
         if not result.data:
             raise HTTPException(status_code=403, detail="Device not registered. Please update the app.")
 
         hmac_key = result.data[0]['hmac_key']
+        rc_customer_id = result.data[0].get('rc_customer_id')
+
+        if not rc_customer_id:
+            raise HTTPException(status_code=403, detail="Device not registered. Please update the app.")
 
         # Update last_used timestamp
         supabase.table('device_keys').update({
             'last_used': datetime.now().isoformat()
         }).eq('device_id', device_id).execute()
 
-        return device_id, hmac_key
+        return device_id, hmac_key, rc_customer_id
 
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid device ID format")
@@ -373,67 +380,98 @@ def decrypt_credentials(encrypted_data: dict, hmac_key: str) -> dict:
 
     return decrypted
 
-async def check_rate_limit(device_id: str):
-    """Check and enforce tier-based rate limits per device using Upstash Redis"""
+def cache_rc_verification(rc_customer_id: str, tier: str, expiry: Optional[datetime]) -> None:
+    """Cache RevenueCat verification result in Upstash"""
+    if not redis_client:
+        return
+
+    try:
+        cache_data = {
+            "tier": tier,
+            "expiry": expiry.isoformat() if expiry else None,
+            "cached_at": datetime.now(timezone.utc).isoformat()
+        }
+        key = f"rc_verified:{rc_customer_id}"
+        redis_client.setex(key, RC_CACHE_TTL, json.dumps(cache_data))
+        logger.info(f"📦 Cached RC verification for {rc_customer_id[:16]}... (tier={tier}, ttl=6h)")
+    except Exception as e:
+        logger.warning(f"Failed to cache RC verification: {e}")
+
+def get_cached_rc_verification(rc_customer_id: str) -> Optional[dict]:
+    """Get cached RevenueCat verification from Upstash"""
+    if not redis_client:
+        return None
+
+    try:
+        key = f"rc_verified:{rc_customer_id}"
+        cached = redis_client.get(key)
+        if cached:
+            data = json.loads(cached)
+            # Check if cached tier has expired
+            if data.get("expiry"):
+                expiry_dt = datetime.fromisoformat(data["expiry"])
+                if expiry_dt <= datetime.now(timezone.utc):
+                    logger.info(f"🗑️  Cached tier expired for {rc_customer_id[:16]}...")
+                    redis_client.delete(key)
+                    return None
+            logger.info(f"✅ Cache hit for RC customer {rc_customer_id[:16]}... (tier={data['tier']})")
+            return data
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to get cached RC verification: {e}")
+        return None
+
+async def check_rate_limit(device_id: str, rc_customer_id: str):
+    """Check and enforce tier-based rate limits using cached RC data from Upstash"""
     if not redis_client:
         # Redis not available - skip rate limiting (dev mode)
         print(f"⚠️  Rate limiting skipped for {device_id[:8]}... (Redis not configured)")
         return
 
-    # Get subscription tier for this device
+    # Get tier from cached RC verification
     try:
-        key_info = supabase.table('device_keys').select('user_id').eq('device_id', device_id).execute()
-        user_id = key_info.data[0]['user_id'] if key_info.data else None
-        logger.info(
-            "🔐 Device %s linked user_id=%s",
-            device_id[:8],
-            f"{user_id[:8]}..." if isinstance(user_id, str) else user_id,
-        )
+        cached_data = get_cached_rc_verification(rc_customer_id)
 
-        result = supabase.rpc('get_device_subscription_tier', params={'p_device_id': device_id}).execute()
-        tier_raw = result.data
-        logger.info(
-            "🧮 Tier lookup for %s returned %s (type=%s)",
-            device_id[:8],
-            tier_raw,
-            type(tier_raw).__name__,
-        )
-        tier = tier_raw.lower() if isinstance(tier_raw, str) else None
+        if not cached_data:
+            logger.warning(f"🚫 No cached tier found for RC customer {rc_customer_id[:16]}...")
+            raise HTTPException(
+                status_code=403,
+                detail="Device not registered. Please update the app."
+            )
+
+        tier = cached_data.get("tier")
 
         # Determine rate limit based on tier
         if tier in ('mega', 'ultra'):
             limit = RATE_LIMIT_MEGA_REQUESTS
-            tier_name = "Ultra/Mega (15 messages/12 hours)"
+            tier_name = f"{tier.capitalize()} (15 messages/12 hours)"
             logger.info("✅ %s recognized as %s tier", device_id[:8], tier.capitalize())
         elif tier == 'pro':
             limit = RATE_LIMIT_PRO_REQUESTS
             tier_name = "Pro (3 messages/12 hours)"
             logger.info("✅ %s recognized as Pro tier", device_id[:8])
         else:
-            logger.warning(
-                "🚫 No subscription tier found for %s. tier_raw=%s",
-                device_id[:8],
-                tier_raw,
-            )
-            # No active subscription - shouldn't happen as auth checks this
+            logger.warning(f"🚫 Unknown tier '{tier}' for {device_id[:8]}")
             raise HTTPException(
                 status_code=403,
-                detail="No active Pro or Mega subscription found"
+                detail="Invalid subscription tier"
             )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get subscription tier for device {device_id[:8]}...: {e}")
-        # Default to Pro tier on error (more restrictive)
-        limit = RATE_LIMIT_PRO_REQUESTS
-        tier_name = "Pro (fallback)"
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to verify subscription"
+        )
 
     # Use Redis sorted set for time-based rate limiting
-    # Key format: ratelimit:{device_id}
+    # Key format: ratelimit_rc:{rc_customer_id}
     # Score: timestamp
     # Value: unique request ID
-    key = f"ratelimit:{device_id}"
+    # All devices with same RC subscription share the rate limit
+    key = f"ratelimit_rc:{rc_customer_id}"
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
 
@@ -2258,180 +2296,154 @@ async def register_device(request: DeviceRegisterRequest):
             request.subscription_tier or "unspecified"
         )
 
-        # Verify Mega subscription with RevenueCat
+        # Verify subscription with RevenueCat (cache-first)
         logger.info(f"🎫 Verifying RevenueCat subscription for device {device_id[:8]}...")
-
-        if not REVENUECAT_SECRET_KEY:
-            logger.error("RevenueCat secret key not configured!")
-            raise HTTPException(status_code=500, detail="Subscription verification unavailable")
 
         if not request.receipt_token:
             raise HTTPException(status_code=403, detail="Receipt token required")
 
+        rc_customer_id = request.receipt_token
         tier_expiry: Optional[datetime] = None
 
-        # Verify with RevenueCat (sandbox receipts work the same as production)
-        try:
-            rc_response = httpx.get(
-                f"https://api.revenuecat.com/v1/subscribers/{request.receipt_token}",
-                headers={
-                    "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
-                    "Content-Type": "application/json"
-                },
-                timeout=10.0
-            )
-
-            if rc_response.status_code != 200:
-                body_preview = rc_response.text[:300] if rc_response.text else '<empty>'
-                logger.warning(
-                    "RevenueCat verification failed: %s body=%s",
-                    rc_response.status_code,
-                    body_preview
-                )
-                raise HTTPException(status_code=403, detail="Invalid subscription")
-
-            subscriber_data = rc_response.json()
-            entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
-
-            def parse_entitlement(name: str):
-                ent = entitlements.get(name)
-                if not ent:
-                    return False, None
-
-                expires_str = ent.get("expires_date")
-                expires_dt = None
-                if expires_str:
-                    try:
-                        expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
-                    except ValueError:
-                        logger.warning(f"Unable to parse expires_date for entitlement '{name}': {expires_str}")
-
-                is_active = bool(ent.get("is_active")) and (
-                    not expires_dt or expires_dt > datetime.now(expires_dt.tzinfo)
-                )
-
-                if expires_dt and expires_dt <= datetime.now(expires_dt.tzinfo):
-                    is_active = False
-
-                return is_active, expires_dt
-
-            active_tier = None
-            tier_expiry = None
-
-            ultra_active, ultra_expiry = parse_entitlement("Ultra")
-            if ultra_active:
-                active_tier = "ultra"
-                tier_expiry = ultra_expiry
-            else:
-                mega_active, mega_expiry = parse_entitlement("Mega")
-                if mega_active:
-                    active_tier = "mega"
-                    tier_expiry = mega_expiry
-                else:
-                    for name in ("Pro", "Pro Yearly"):
-                        pro_active, pro_expiry = parse_entitlement(name)
-                        if pro_active:
-                            active_tier = "pro"
-                            tier_expiry = pro_expiry
-                            break
-
-            if not active_tier:
-                logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
-                raise HTTPException(
-                    status_code=403,
-                    detail="Zagreus Pro or Mega subscription required",
-                )
-
-            if request.subscription_tier and request.subscription_tier.lower() != active_tier:
-                logger.warning(
-                    "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
-                    device_id[:8],
-                    request.subscription_tier,
-                    active_tier,
-                )
-
-            if tier_expiry:
-                logger.info(
-                    "✅ Verified %s subscription for device %s (expires %s)",
-                    active_tier.capitalize(),
-                    device_id[:8],
-                    tier_expiry.isoformat(),
-                )
-            else:
-                logger.info(
-                    "✅ Verified %s subscription for device %s",
-                    active_tier.capitalize(),
-                    device_id[:8],
-                )
-
-        except httpx.RequestError as e:
-            logger.error(f"RevenueCat API error: {e}")
-            raise HTTPException(status_code=502, detail="Failed to verify subscription")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error verifying subscription: {e}")
-            raise HTTPException(status_code=500, detail="Subscription verification failed")
-
-        # Upsert subscription to Supabase if we have user_id and verified tier
-        if request.user_id and active_tier:
-            try:
-                logger.info(
-                    "📝 Syncing subscription: user=%s tier=%s expiry=%s",
-                    request.user_id[:8],
-                    active_tier,
-                    tier_expiry.isoformat() if tier_expiry else "no_expiry"
-                )
-
-                product_lookup = {
-                    "ultra": "Ultra",
-                    "mega": "Mega",
-                    "pro": "Pro",
-                }
-
-                subscription_data = {
-                    'user_id': request.user_id,
-                    'subscription_type': active_tier,
-                    'status': 'active',
-                    'product_id': product_lookup.get(active_tier, 'Pro'),
-                    'expires_at': tier_expiry.isoformat() if tier_expiry else (datetime.now(timezone.utc) + timedelta(days=365)).isoformat(),
-                    'updated_at': datetime.now(timezone.utc).isoformat()
-                }
-
-                # Ensure one row per user: delete any stale rows then insert fresh
-                logger.info(f"🗑️  Deleting old subscriptions for user {request.user_id[:8]}")
-                delete_result = supabase.table('subscriptions').delete().eq('user_id', request.user_id).execute()
-                logger.info(f"✏️  Deleted {len(delete_result.data) if delete_result.data else 0} old rows")
-
-                logger.info(f"➕ Inserting new subscription row for user {request.user_id[:8]}")
-                insert_result = supabase.table('subscriptions').insert(subscription_data).execute()
-                logger.info(f"✅ Insert result: {len(insert_result.data) if insert_result.data else 0} rows inserted")
-
-                logger.info(
-                    "💾 Synced %s subscription to Supabase for user %s",
-                    active_tier,
-                    request.user_id[:8],
-                )
-            except Exception as e:
-                logger.error(f"❌ Failed to sync subscription to Supabase: {e}")
-                logger.error(f"   Subscription data: {subscription_data if 'subscription_data' in locals() else 'not created'}")
-                import traceback
-                logger.error(traceback.format_exc())
-                # Don't fail registration if subscription sync fails
+        # Check cache first
+        cached_data = get_cached_rc_verification(rc_customer_id)
+        if cached_data:
+            active_tier = cached_data.get("tier")
+            expiry_str = cached_data.get("expiry")
+            tier_expiry = datetime.fromisoformat(expiry_str) if expiry_str else None
+            logger.info(f"✅ Using cached {active_tier} tier for {rc_customer_id[:16]}...")
         else:
-            logger.warning(
-                "⚠️  Skipping subscription sync: user_id=%s active_tier=%s",
-                request.user_id[:8] if request.user_id else "None",
-                active_tier or "None"
-            )
+            # Cache miss - verify with RevenueCat API
+            if not REVENUECAT_SECRET_KEY:
+                logger.error("RevenueCat secret key not configured!")
+                raise HTTPException(status_code=500, detail="Subscription verification unavailable")
 
-        # Check if device already exists
+            logger.info(f"🌐 Cache miss - hitting RevenueCat API for {rc_customer_id[:16]}...")
+            try:
+                rc_response = httpx.get(
+                    f"https://api.revenuecat.com/v1/subscribers/{request.receipt_token}",
+                    headers={
+                        "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    timeout=10.0
+                )
+
+                if rc_response.status_code != 200:
+                    body_preview = rc_response.text[:300] if rc_response.text else '<empty>'
+                    logger.warning(
+                        "RevenueCat verification failed: %s body=%s",
+                        rc_response.status_code,
+                        body_preview
+                    )
+                    raise HTTPException(status_code=403, detail="Invalid subscription")
+
+                subscriber_data = rc_response.json()
+                entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
+
+                # Debug: log what entitlements are actually present
+                logger.info(f"🔍 Available entitlements: {list(entitlements.keys())}")
+                for ent_name, ent_data in entitlements.items():
+                    logger.info(f"   - {ent_name}: is_active={ent_data.get('is_active')}, expires={ent_data.get('expires_date')}")
+
+                def parse_entitlement(name: str):
+                    ent = entitlements.get(name)
+                    if not ent:
+                        return False, None
+
+                    expires_str = ent.get("expires_date")
+                    expires_dt = None
+                    if expires_str:
+                        try:
+                            expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+                        except ValueError:
+                            logger.warning(f"Unable to parse expires_date for entitlement '{name}': {expires_str}")
+
+                    # Check if subscription is active
+                    # is_active field might be None when manually granted, so check expiry date instead
+                    is_active_field = ent.get("is_active")
+
+                    if is_active_field is None:
+                        # No is_active field - check expiry date
+                        is_active = expires_dt and expires_dt > datetime.now(timezone.utc)
+                    else:
+                        # Has is_active field - use it and verify expiry
+                        is_active = bool(is_active_field) and (
+                            not expires_dt or expires_dt > datetime.now(timezone.utc)
+                        )
+
+                    return is_active, expires_dt
+
+                active_tier = None
+                tier_expiry = None
+
+                ultra_active, ultra_expiry = parse_entitlement("Ultra")
+                if ultra_active:
+                    active_tier = "ultra"
+                    tier_expiry = ultra_expiry
+                else:
+                    mega_active, mega_expiry = parse_entitlement("Mega")
+                    if mega_active:
+                        active_tier = "mega"
+                        tier_expiry = mega_expiry
+                    else:
+                        for name in ("Pro", "Pro Yearly"):
+                            pro_active, pro_expiry = parse_entitlement(name)
+                            if pro_active:
+                                active_tier = "pro"
+                                tier_expiry = pro_expiry
+                                break
+
+                if not active_tier:
+                    logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Zagreus Pro or Mega subscription required",
+                    )
+
+                if request.subscription_tier and request.subscription_tier.lower() != active_tier:
+                    logger.warning(
+                        "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
+                        device_id[:8],
+                        request.subscription_tier,
+                        active_tier,
+                    )
+
+                if tier_expiry:
+                    logger.info(
+                        "✅ Verified %s subscription for device %s (expires %s)",
+                        active_tier.capitalize(),
+                        device_id[:8],
+                        tier_expiry.isoformat(),
+                    )
+                else:
+                    logger.info(
+                        "✅ Verified %s subscription for device %s",
+                        active_tier.capitalize(),
+                        device_id[:8],
+                    )
+
+                # Cache the verified tier for 6 hours
+                cache_rc_verification(rc_customer_id, active_tier, tier_expiry)
+
+            except httpx.RequestError as e:
+                logger.error(f"RevenueCat API error: {e}")
+                raise HTTPException(status_code=502, detail="Failed to verify subscription")
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"Unexpected error verifying subscription: {e}")
+                raise HTTPException(status_code=500, detail="Subscription verification failed")
+
+        # Store device registration (HMAC key for authentication)
+        # No need to sync subscriptions - tier is cached in Upstash!
         existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()
 
         if existing.data:
-            # Update existing device's HMAC key and user_id (if provided)
+            # Update existing device's HMAC key, rc_customer_id, and user_id (if provided)
             update_data = {
                 'hmac_key': request.hmac_key,
+                'rc_customer_id': rc_customer_id,
                 'last_used': datetime.now().isoformat()
             }
             if request.user_id:
@@ -2453,6 +2465,7 @@ async def register_device(request: DeviceRegisterRequest):
             insert_data = {
                 'device_id': device_id,
                 'hmac_key': request.hmac_key,
+                'rc_customer_id': rc_customer_id,
                 'created_at': datetime.now().isoformat(),
                 'last_used': datetime.now().isoformat(),
                 'request_count': 0
@@ -2486,11 +2499,11 @@ async def register_device(request: DeviceRegisterRequest):
 @app.post("/chat")
 async def chat(
     request: ChatRequest,
-    device_auth: tuple[str, str] = Depends(verify_device_subscription)
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
 ):
     """Unified chat endpoint - handles both explore and library management"""
-    device_id, hmac_key = device_auth
-    await check_rate_limit(device_id)
+    device_id, hmac_key, rc_customer_id = device_auth
+    await check_rate_limit(device_id, rc_customer_id)
 
     try:
         print(f"💬 CHAT: {request.message} (device: {device_id[:8]}...)")
@@ -2618,7 +2631,7 @@ async def chat(
 
 @app.post("/deep-cuts/generate")
 async def generate_deep_cuts_endpoint(
-    device_auth: tuple[str, str] = Depends(verify_device_subscription),
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
     x_subscription_tier: str = Header(default="ultra")
 ):
     """Generate AI-powered deep cuts recommendations for Mega/Ultra users.
@@ -2626,7 +2639,7 @@ async def generate_deep_cuts_endpoint(
     This endpoint triggers weekly deep cuts generation based on library + watch history.
     Mega users get gpt-5-mini, Ultra users get gpt-5."""
 
-    device_id, hmac_key = device_auth
+    device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
 
     try:
@@ -2655,11 +2668,11 @@ async def generate_deep_cuts_endpoint(
 
 @app.get("/deep-cuts")
 async def get_deep_cuts(
-    device_auth: tuple[str, str] = Depends(verify_device_subscription)
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
 ):
     """Retrieve cached deep cuts recommendations for a device."""
 
-    device_id, hmac_key = device_auth
+    device_id, hmac_key, rc_customer_id = device_auth
 
     try:
         result = supabase.table('deep_cuts_cache').select('*').eq('device_id', device_id).execute()

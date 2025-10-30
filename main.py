@@ -2263,110 +2263,103 @@ async def register_device(request: DeviceRegisterRequest):
 
         tier_expiry: Optional[datetime] = None
 
-        # DEVELOPMENT MODE: Skip verification for anonymous IDs (simulator/testing)
-        if request.receipt_token.startswith("$RCAnonymousID:"):
-            logger.warning(f"⚠️  DEV MODE: Bypassing RevenueCat verification for anonymous user")
-            # Allow registration for testing
-            active_tier = request.subscription_tier.lower() if request.subscription_tier else "dev-bypass"
-        else:
-            # Verify with RevenueCat API
-            try:
-                # Get subscriber info from RevenueCat
-                rc_response = httpx.get(
-                    f"https://api.revenuecat.com/v1/subscribers/{request.receipt_token}",
-                    headers={
-                        "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    timeout=10.0
+        # Verify with RevenueCat (sandbox receipts work the same as production)
+        try:
+            rc_response = httpx.get(
+                f"https://api.revenuecat.com/v1/subscribers/{request.receipt_token}",
+                headers={
+                    "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
+                    "Content-Type": "application/json"
+                },
+                timeout=10.0
+            )
+
+            if rc_response.status_code != 200:
+                logger.warning(f"RevenueCat verification failed: {rc_response.status_code}")
+                raise HTTPException(status_code=403, detail="Invalid subscription")
+
+            subscriber_data = rc_response.json()
+            entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
+
+            def parse_entitlement(name: str):
+                ent = entitlements.get(name)
+                if not ent:
+                    return False, None
+
+                expires_str = ent.get("expires_date")
+                expires_dt = None
+                if expires_str:
+                    try:
+                        expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        logger.warning(f"Unable to parse expires_date for entitlement '{name}': {expires_str}")
+
+                is_active = bool(ent.get("is_active")) and (
+                    not expires_dt or expires_dt > datetime.now(expires_dt.tzinfo)
                 )
 
-                if rc_response.status_code != 200:
-                    logger.warning(f"RevenueCat verification failed: {rc_response.status_code}")
-                    raise HTTPException(status_code=403, detail="Invalid subscription")
+                if expires_dt and expires_dt <= datetime.now(expires_dt.tzinfo):
+                    is_active = False
 
-                subscriber_data = rc_response.json()
-                entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
+                return is_active, expires_dt
 
-                def parse_entitlement(name: str):
-                    ent = entitlements.get(name)
-                    if not ent:
-                        return False, None
+            active_tier = None
+            tier_expiry = None
 
-                    expires_str = ent.get("expires_date")
-                    expires_dt = None
-                    if expires_str:
-                        try:
-                            expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
-                        except ValueError:
-                            logger.warning(f"Unable to parse expires_date for entitlement '{name}': {expires_str}")
-
-                    is_active = bool(ent.get("is_active")) and (
-                        not expires_dt or expires_dt > datetime.now(expires_dt.tzinfo)
-                    )
-
-                    if expires_dt and expires_dt <= datetime.now(expires_dt.tzinfo):
-                        is_active = False
-
-                    return is_active, expires_dt
-
-                active_tier = None
-                tier_expiry = None
-
-                ultra_active, ultra_expiry = parse_entitlement("Ultra")
-                if ultra_active:
-                    active_tier = "ultra"
-                    tier_expiry = ultra_expiry
+            ultra_active, ultra_expiry = parse_entitlement("Ultra")
+            if ultra_active:
+                active_tier = "ultra"
+                tier_expiry = ultra_expiry
+            else:
+                mega_active, mega_expiry = parse_entitlement("Mega")
+                if mega_active:
+                    active_tier = "mega"
+                    tier_expiry = mega_expiry
                 else:
-                    mega_active, mega_expiry = parse_entitlement("Mega")
-                    if mega_active:
-                        active_tier = "mega"
-                        tier_expiry = mega_expiry
-                    else:
-                        for name in ("Pro", "Pro Yearly"):
-                            pro_active, pro_expiry = parse_entitlement(name)
-                            if pro_active:
-                                active_tier = "pro"
-                                tier_expiry = pro_expiry
-                                break
+                    for name in ("Pro", "Pro Yearly"):
+                        pro_active, pro_expiry = parse_entitlement(name)
+                        if pro_active:
+                            active_tier = "pro"
+                            tier_expiry = pro_expiry
+                            break
 
-                if not active_tier:
-                    logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Zagreus Pro or Mega subscription required",
-                    )
+            if not active_tier:
+                logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Zagreus Pro or Mega subscription required",
+                )
 
-                if request.subscription_tier and request.subscription_tier.lower() != active_tier:
-                    logger.warning(
-                        "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
-                        device_id[:8],
-                        request.subscription_tier,
-                        active_tier,
-                    )
+            if request.subscription_tier and request.subscription_tier.lower() != active_tier:
+                logger.warning(
+                    "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
+                    device_id[:8],
+                    request.subscription_tier,
+                    active_tier,
+                )
 
-                if tier_expiry:
-                    logger.info(
-                        "✅ Verified %s subscription for device %s (expires %s)",
-                        active_tier.capitalize(),
-                        device_id[:8],
-                        tier_expiry.isoformat(),
-                    )
-                else:
-                    logger.info(
-                        "✅ Verified %s subscription for device %s",
-                        active_tier.capitalize(),
-                        device_id[:8],
-                    )
+            if tier_expiry:
+                logger.info(
+                    "✅ Verified %s subscription for device %s (expires %s)",
+                    active_tier.capitalize(),
+                    device_id[:8],
+                    tier_expiry.isoformat(),
+                )
+            else:
+                logger.info(
+                    "✅ Verified %s subscription for device %s",
+                    active_tier.capitalize(),
+                    device_id[:8],
+                )
 
-            except httpx.RequestError as e:
-                logger.error(f"RevenueCat API error: {e}")
-                raise HTTPException(status_code=502, detail="Failed to verify subscription")
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error verifying subscription: {e}")
-                raise HTTPException(status_code=500, detail="Subscription verification failed")
+        except httpx.RequestError as e:
+            logger.error(f"RevenueCat API error: {e}")
+            raise HTTPException(status_code=502, detail="Failed to verify subscription")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error verifying subscription: {e}")
+            raise HTTPException(status_code=500, detail="Subscription verification failed")
 
         # Upsert subscription to Supabase if we have user_id and verified tier
         if request.user_id and active_tier:
@@ -2386,10 +2379,9 @@ async def register_device(request: DeviceRegisterRequest):
                     'updated_at': datetime.now(timezone.utc).isoformat()
                 }
 
-                supabase.table('subscriptions').upsert(
-                    subscription_data,
-                    on_conflict='user_id'
-                ).execute()
+                # Ensure one row per user: delete any stale rows then insert fresh
+                supabase.table('subscriptions').delete().eq('user_id', request.user_id).execute()
+                supabase.table('subscriptions').insert(subscription_data).execute()
 
                 logger.info(
                     "💾 Synced %s subscription to Supabase for user %s",

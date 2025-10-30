@@ -398,13 +398,13 @@ async def check_rate_limit(device_id: str):
             tier_raw,
             type(tier_raw).__name__,
         )
-        tier = tier_raw if tier_raw else None
+        tier = tier_raw.lower() if isinstance(tier_raw, str) else None
 
         # Determine rate limit based on tier
-        if tier == 'mega':
+        if tier in ('mega', 'ultra'):
             limit = RATE_LIMIT_MEGA_REQUESTS
-            tier_name = "Mega (15 messages/12 hours)"
-            logger.info("✅ %s recognized as Mega tier", device_id[:8])
+            tier_name = "Ultra/Mega (15 messages/12 hours)"
+            logger.info("✅ %s recognized as %s tier", device_id[:8], tier.capitalize())
         elif tier == 'pro':
             limit = RATE_LIMIT_PRO_REQUESTS
             tier_name = "Pro (3 messages/12 hours)"
@@ -2311,17 +2311,22 @@ async def register_device(request: DeviceRegisterRequest):
                 active_tier = None
                 tier_expiry = None
 
-                mega_active, mega_expiry = parse_entitlement("Mega")
-                if mega_active:
-                    active_tier = "mega"
-                    tier_expiry = mega_expiry
+                ultra_active, ultra_expiry = parse_entitlement("Ultra")
+                if ultra_active:
+                    active_tier = "ultra"
+                    tier_expiry = ultra_expiry
                 else:
-                    for name in ("Pro", "Pro Yearly"):
-                        pro_active, pro_expiry = parse_entitlement(name)
-                        if pro_active:
-                            active_tier = "pro"
-                            tier_expiry = pro_expiry
-                            break
+                    mega_active, mega_expiry = parse_entitlement("Mega")
+                    if mega_active:
+                        active_tier = "mega"
+                        tier_expiry = mega_expiry
+                    else:
+                        for name in ("Pro", "Pro Yearly"):
+                            pro_active, pro_expiry = parse_entitlement(name)
+                            if pro_active:
+                                active_tier = "pro"
+                                tier_expiry = pro_expiry
+                                break
 
                 if not active_tier:
                     logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
@@ -2360,6 +2365,38 @@ async def register_device(request: DeviceRegisterRequest):
             except Exception as e:
                 logger.error(f"Unexpected error verifying subscription: {e}")
                 raise HTTPException(status_code=500, detail="Subscription verification failed")
+
+        # Upsert subscription to Supabase if we have user_id and verified tier
+        if request.user_id and active_tier:
+            try:
+                product_lookup = {
+                    "ultra": "Ultra",
+                    "mega": "Mega",
+                    "pro": "Pro",
+                }
+
+                subscription_data = {
+                    'user_id': request.user_id,
+                    'subscription_type': active_tier,
+                    'status': 'active',
+                    'product_id': product_lookup.get(active_tier, 'Pro'),
+                    'expires_at': tier_expiry.isoformat() if tier_expiry else (datetime.now() + timedelta(days=365)).isoformat(),
+                    'updated_at': datetime.now().isoformat()
+                }
+
+                supabase.table('subscriptions').upsert(
+                    subscription_data,
+                    on_conflict='user_id'
+                ).execute()
+
+                logger.info(
+                    "💾 Synced %s subscription to Supabase for user %s",
+                    active_tier,
+                    request.user_id[:8],
+                )
+            except Exception as e:
+                logger.warning(f"Failed to sync subscription to Supabase: {e}")
+                # Don't fail registration if subscription sync fails
 
         # Check if device already exists
         existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()

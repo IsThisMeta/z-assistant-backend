@@ -3,7 +3,7 @@ from pydantic import BaseModel, validator
 from openai import OpenAI
 import httpx
 import os
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import uuid
 import json
 from datetime import datetime, timedelta, timezone

@@ -421,6 +421,107 @@ def get_cached_rc_verification(rc_customer_id: str) -> Optional[dict]:
         logger.warning(f"Failed to get cached RC verification: {e}")
         return None
 
+def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
+    """Fetch subscription tier from RevenueCat and return (tier, expiry)"""
+    if not REVENUECAT_SECRET_KEY:
+        logger.error("RevenueCat secret key not configured!")
+        raise HTTPException(status_code=500, detail="Subscription verification unavailable")
+
+    logger.info(f"🌐 Refreshing RevenueCat subscription for {rc_customer_id[:16]}...")
+    try:
+        rc_response = httpx.get(
+            f"https://api.revenuecat.com/v1/subscribers/{rc_customer_id}",
+            headers={
+                "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
+                "Content-Type": "application/json",
+            },
+            timeout=10.0,
+        )
+    except httpx.HTTPError as e:
+        logger.error(f"RevenueCat API error for {rc_customer_id[:16]}...: {e}")
+        raise HTTPException(status_code=502, detail="Failed to verify subscription")
+
+    if rc_response.status_code != 200:
+        body_preview = rc_response.text[:300] if rc_response.text else "<empty>"
+        logger.warning(
+            "RevenueCat verification failed: %s body=%s",
+            rc_response.status_code,
+            body_preview,
+        )
+        raise HTTPException(status_code=403, detail="Invalid subscription")
+
+    subscriber_data = rc_response.json()
+    entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
+
+    logger.info(f"🔍 Available entitlements: {list(entitlements.keys())}")
+    for ent_name, ent_data in entitlements.items():
+        logger.info(
+            "   - %s: is_active=%s, expires=%s",
+            ent_name,
+            ent_data.get("is_active"),
+            ent_data.get("expires_date"),
+        )
+
+    def parse_entitlement(name: str) -> tuple[bool, Optional[datetime]]:
+        ent = entitlements.get(name)
+        if not ent:
+            return False, None
+
+        expires_str = ent.get("expires_date")
+        expires_dt: Optional[datetime] = None
+        if expires_str:
+            try:
+                expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
+            except ValueError:
+                logger.warning(
+                    "Unable to parse expires_date for entitlement '%s': %s",
+                    name,
+                    expires_str,
+                )
+
+        is_active_field = ent.get("is_active")
+        if is_active_field is None:
+            is_active = expires_dt and expires_dt > datetime.now(timezone.utc)
+        else:
+            is_active = bool(is_active_field) and (
+                not expires_dt or expires_dt > datetime.now(timezone.utc)
+            )
+
+        return bool(is_active), expires_dt
+
+    tier: Optional[str] = None
+    tier_expiry: Optional[datetime] = None
+
+    ultra_active, ultra_expiry = parse_entitlement("Ultra")
+    if ultra_active:
+        tier = "ultra"
+        tier_expiry = ultra_expiry
+    else:
+        mega_active, mega_expiry = parse_entitlement("Mega")
+        if mega_active:
+            tier = "mega"
+            tier_expiry = mega_expiry
+        else:
+            for name in ("Pro", "Pro Yearly"):
+                pro_active, pro_expiry = parse_entitlement(name)
+                if pro_active:
+                    tier = "pro"
+                    tier_expiry = pro_expiry
+                    break
+
+    if not tier:
+        logger.warning(f"No active subscription found for {rc_customer_id[:16]}...")
+        raise HTTPException(status_code=403, detail="Zagreus Pro, Mega, or Ultra subscription required")
+
+    logger.info(
+        "✅ Verified %s subscription for %s (expires %s)",
+        tier.capitalize(),
+        rc_customer_id[:16] + "...",
+        tier_expiry.isoformat() if tier_expiry else "unknown",
+    )
+
+    return tier, tier_expiry
+
 async def check_rate_limit(device_id: str, rc_customer_id: str):
     """Check and enforce tier-based rate limits using cached RC data from Upstash"""
     if not redis_client:
@@ -433,11 +534,16 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
         cached_data = get_cached_rc_verification(rc_customer_id)
 
         if not cached_data:
-            logger.warning(f"🚫 No cached tier found for RC customer {rc_customer_id[:16]}...")
-            raise HTTPException(
-                status_code=403,
-                detail="Device not registered. Please update the app."
+            logger.info(
+                "🧹 Expired cache for RC customer %s... refreshing",
+                rc_customer_id[:16],
             )
+            tier, expiry = verify_rc_customer(rc_customer_id)
+            cache_rc_verification(rc_customer_id, tier, expiry)
+            cached_data = {
+                "tier": tier,
+                "expiry": expiry.isoformat() if expiry else None,
+            }
 
         tier = cached_data.get("tier")
 
@@ -2314,126 +2420,16 @@ async def register_device(request: DeviceRegisterRequest):
             logger.info(f"✅ Using cached {active_tier} tier for {rc_customer_id[:16]}...")
         else:
             # Cache miss - verify with RevenueCat API
-            if not REVENUECAT_SECRET_KEY:
-                logger.error("RevenueCat secret key not configured!")
-                raise HTTPException(status_code=500, detail="Subscription verification unavailable")
-
-            logger.info(f"🌐 Cache miss - hitting RevenueCat API for {rc_customer_id[:16]}...")
-            try:
-                rc_response = httpx.get(
-                    f"https://api.revenuecat.com/v1/subscribers/{request.receipt_token}",
-                    headers={
-                        "Authorization": f"Bearer {REVENUECAT_SECRET_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    timeout=10.0
+            active_tier, tier_expiry = verify_rc_customer(rc_customer_id)
+            if request.subscription_tier and request.subscription_tier.lower() != active_tier:
+                logger.warning(
+                    "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
+                    device_id[:8],
+                    request.subscription_tier,
+                    active_tier,
                 )
-
-                if rc_response.status_code != 200:
-                    body_preview = rc_response.text[:300] if rc_response.text else '<empty>'
-                    logger.warning(
-                        "RevenueCat verification failed: %s body=%s",
-                        rc_response.status_code,
-                        body_preview
-                    )
-                    raise HTTPException(status_code=403, detail="Invalid subscription")
-
-                subscriber_data = rc_response.json()
-                entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
-
-                # Debug: log what entitlements are actually present
-                logger.info(f"🔍 Available entitlements: {list(entitlements.keys())}")
-                for ent_name, ent_data in entitlements.items():
-                    logger.info(f"   - {ent_name}: is_active={ent_data.get('is_active')}, expires={ent_data.get('expires_date')}")
-
-                def parse_entitlement(name: str):
-                    ent = entitlements.get(name)
-                    if not ent:
-                        return False, None
-
-                    expires_str = ent.get("expires_date")
-                    expires_dt = None
-                    if expires_str:
-                        try:
-                            expires_dt = datetime.fromisoformat(expires_str.replace("Z", "+00:00"))
-                        except ValueError:
-                            logger.warning(f"Unable to parse expires_date for entitlement '{name}': {expires_str}")
-
-                    # Check if subscription is active
-                    # is_active field might be None when manually granted, so check expiry date instead
-                    is_active_field = ent.get("is_active")
-
-                    if is_active_field is None:
-                        # No is_active field - check expiry date
-                        is_active = expires_dt and expires_dt > datetime.now(timezone.utc)
-                    else:
-                        # Has is_active field - use it and verify expiry
-                        is_active = bool(is_active_field) and (
-                            not expires_dt or expires_dt > datetime.now(timezone.utc)
-                        )
-
-                    return is_active, expires_dt
-
-                active_tier = None
-                tier_expiry = None
-
-                ultra_active, ultra_expiry = parse_entitlement("Ultra")
-                if ultra_active:
-                    active_tier = "ultra"
-                    tier_expiry = ultra_expiry
-                else:
-                    mega_active, mega_expiry = parse_entitlement("Mega")
-                    if mega_active:
-                        active_tier = "mega"
-                        tier_expiry = mega_expiry
-                    else:
-                        for name in ("Pro", "Pro Yearly"):
-                            pro_active, pro_expiry = parse_entitlement(name)
-                            if pro_active:
-                                active_tier = "pro"
-                                tier_expiry = pro_expiry
-                                break
-
-                if not active_tier:
-                    logger.warning(f"No active Pro or Mega subscription for {request.receipt_token}")
-                    raise HTTPException(
-                        status_code=403,
-                        detail="Zagreus Pro or Mega subscription required",
-                    )
-
-                if request.subscription_tier and request.subscription_tier.lower() != active_tier:
-                    logger.warning(
-                        "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
-                        device_id[:8],
-                        request.subscription_tier,
-                        active_tier,
-                    )
-
-                if tier_expiry:
-                    logger.info(
-                        "✅ Verified %s subscription for device %s (expires %s)",
-                        active_tier.capitalize(),
-                        device_id[:8],
-                        tier_expiry.isoformat(),
-                    )
-                else:
-                    logger.info(
-                        "✅ Verified %s subscription for device %s",
-                        active_tier.capitalize(),
-                        device_id[:8],
-                    )
-
-                # Cache the verified tier for 6 hours
-                cache_rc_verification(rc_customer_id, active_tier, tier_expiry)
-
-            except httpx.RequestError as e:
-                logger.error(f"RevenueCat API error: {e}")
-                raise HTTPException(status_code=502, detail="Failed to verify subscription")
-            except HTTPException:
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error verifying subscription: {e}")
-                raise HTTPException(status_code=500, detail="Subscription verification failed")
+            # Cache the verified tier for 6 hours
+            cache_rc_verification(rc_customer_id, active_tier, tier_expiry)
 
         # Store device registration (HMAC key for authentication)
         # No need to sync subscriptions - tier is cached in Upstash!

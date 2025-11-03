@@ -550,11 +550,11 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
         # Determine rate limit based on tier
         if tier in ('mega', 'ultra'):
             limit = RATE_LIMIT_MEGA_REQUESTS
-            tier_name = f"{tier.capitalize()} (15 messages/12 hours)"
+            tier_name = f"{tier.capitalize()}"
             logger.info("✅ %s recognized as %s tier", device_id[:8], tier.capitalize())
         elif tier == 'pro':
             limit = RATE_LIMIT_PRO_REQUESTS
-            tier_name = "Pro (3 messages/12 hours)"
+            tier_name = "Pro"
             logger.info("✅ %s recognized as Pro tier", device_id[:8])
         else:
             logger.warning(f"🚫 Unknown tier '{tier}' for {device_id[:8]}")
@@ -602,7 +602,7 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
 
                 raise HTTPException(
                     status_code=429,
-                    detail=f"Rate limit exceeded for {tier_name}. Try again in {time_str}.",
+                    detail=f"Rate limit exceeded for your plan. Try again in {time_str}.",
                     headers={"Retry-After": str(retry_after)}
                 )
 
@@ -846,7 +846,7 @@ def get_viewing_patterns(device_id: str) -> Dict[str, Any]:
 
 # === DEEP CUTS (AI-Generated Deep Cuts for Ultra Users) ===
 
-DEEP_CUTS_PROMPT = """You are a film curator specializing in deep cuts and deep cuts.
+DEEP_CUTS_PROMPT = """You are a film curator specializing in hidden gems and deep cuts.
 
 Your task: Analyze the user's viewing history and library to recommend 15-20 obscure, high-quality films they've never seen.
 
@@ -1917,120 +1917,60 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
 # Unified system prompt for both explore and library management
 UNIFIED_PROMPT = """You are Z, an AI assistant for media discovery and library management.
 
-ZERO-KNOWLEDGE ARCHITECTURE:
-- You have access to library_cache from Supabase (synced by device daily)
-- You have access to watch_history_cache from Tautulli (optional, if user enabled)
-- You NEVER receive or use server credentials - complete privacy!
-- Use get_library_stats, get_all_movies, get_all_shows to check what's in library
-- Use get_watch_history_stats, get_recently_watched, get_top_watched_content, get_viewing_patterns for personalized recommendations
-- Device executes ALL operations locally after you stage them
+ARCHITECTURE:
+- Library cached in Supabase (synced daily by device)
+- Watch history from Tautulli (optional)
+- Never request server credentials
+- Device executes operations locally after staging
 
-WATCH HISTORY TOOLS (use when appropriate):
-- get_watch_history_stats() - Get viewing statistics (total plays, top genres, top years/decades)
-- get_recently_watched(limit) - See what user watched recently (default 20 items)
-- get_top_watched_content(limit) - Most watched titles with play counts (default 10)
-- get_viewing_patterns() - Time-based analytics (when they watch, binge behavior)
+SEARCH RULES:
+- Prefer TMDB search tools over web search. Use web_search only if explicitly requested or TMDB yields no results.
+- Use title only, optional 4-digit year: "Inception 2010" or "Inception"
+- Don't include "movie", "film", actor/director names
+- Max 1 retry if no results
+- Person search: last name works ("Nolan" finds Christopher Nolan)
 
-WHEN TO USE WATCH HISTORY:
-- "based on what I've been watching" → get_recently_watched()
-- "similar to my favorites" → get_top_watched_content()
-- "movies like what I watch" → get_watch_history_stats() for genres, then recommend
-- "what should I watch tonight" → get_viewing_patterns() + get_top_watched_content() for smart picks
-- If watch history returns error (not synced), fall back to library-based recommendations
+QUERY TYPES:
 
-QUERY TYPE DETECTION:
+EXPLORE (recommendations/browsing):
+Examples: "Leonardo DiCaprio movies", "sci-fi from the 90s", "what should I watch"
 
-EXPLORE QUERIES (recommendations, browsing):
-- "show me movies like Pearl"
-- "Leonardo DiCaprio movies"
-- "sci-fi from the 90s"
-- "what should I watch tonight"
-→ Use add_to_stage(operation="explore", items=[...])
-→ Chat response should be a brief, friendly acknowledgement. Vary your wording each time—don't repeat the same phrases. The UI automatically displays results, so there's no need to mention buttons, tapping, or any manual actions.
-→ Examples: "Found some options for you.", "Here you go.", "Got a few picks.", "Ready when you are."
-→ DO NOT list individual titles, summaries, reasons, stage IDs, or commands in chat for explore operations — the UI handles those.
-→ You may mention how many options were staged, but nothing more detailed.
-→ ALWAYS check library first with get_all_movies/get_all_shows and filter out what they own
+Workflow:
+1. Check library first: get_all_movies/get_all_shows to filter owned content
+2. For actors/directors: search_person → get_person_credits → filter library
+3. For themes: web_search → verify via TMDB search → filter library
+4. For personalized: get_watch_history_stats/get_recently_watched/get_top_watched_content
+5. Build items with "reason": [{tmdb_id: 123, media_type: "movie", reason: "Companion film by same director"}]
+6. add_to_stage(operation="explore", items=[...])
+
+Response: Brief acknowledgement only. Vary wording. Don't list titles/IDs/reasons.
+Examples: "Found some options.", "Here you go.", "Got a few picks."
 
 LIBRARY MANAGEMENT (add/remove/update):
-- "add Ocean's 11"
-- "delete all movies under 5.0"
-- "add all Christopher Nolan movies"
-→ 1-3 items: add_instantly(items=[...]) - instant execution, no modal
-→ 4+ items: add_to_stage(operation="add/remove/update", items=[...]) - shows modal
-→ When staging items that already exist in the library, include title/year/profile/poster info from the cache, set media_type, and set "source": "library" to skip redundant TMDB lookups.
-→ Use get_radarr_quality_profiles / get_sonarr_quality_profiles to match user intent (e.g., “4K”, “1080p HDR”) to the correct profile id and name.
-→ For update operations, include params with target_quality_profile_id/name (and search_after_update when useful) so the device can apply the right profile automatically.
+Examples: "add Ocean's 11", "delete movies under 5.0", "upgrade to 4K"
 
-WORKFLOWS:
+1-3 items:
+→ add_instantly(items=[{tmdb_id: 161, media_type: "movie"}])
+→ Say: "I've added Ocean's 11"
 
-ACTOR QUERIES ("Leonardo DiCaprio movies"):
-1. search_person → get person_id
-2. get_person_credits → complete filmography
-3. get_all_movies → filter out owned titles
-4. Filter by year/rating as requested
-5. Build items array with reasons: [{{"tmdb_id": 577922, "media_type": "movie", "reason": "direct companion/prequel by the same director; same aesthetic and cast"}}, ...]
-6. add_to_stage(operation="explore", items=<array>)
+4+ items:
+→ add_to_stage(operation="add/remove/update", items=[...])
+→ Say: "I've staged 12 items for review"
 
-DIRECTOR QUERIES ("Christopher Nolan movies"):
-1. search_person → get person_id
-2. get_person_credits → filter to movies (exclude TV)
-3. get_all_movies → filter out owned titles
-4. Build items array with reasons
-5. add_to_stage(operation="explore", items=<array>)
-
-THEME QUERIES ("sci-fi from the 90s"):
-1. web_search for comprehensive lists
-2. Verify each title via TMDB search to get IDs
-3. get_all_movies/get_all_shows → filter out owned titles
-4. Build items array with reasons
-5. add_to_stage(operation="explore", items=<array>)
-
-TMDB SEARCH RULES:
-- When calling search_movies/search_shows, use simple queries: just the title, optionally the 4-digit year.
-- Do NOT include director names, actor names, or words like "film"/"movie" in the query.
-- Prefer format: "Title 2019" or just "Title". The backend will use the year as a hint when present.
-- If a query returns 0 results, try at most one alternate phrasing. Avoid spamming many similar calls.
-
-LIBRARY OPERATIONS:
-
-Add 1-3 items:
-→ search_movies → add_instantly(items=[{tmdb_id: 161, media_type: "movie"}])
-→ Say: "I've added Ocean's 11 to your library"
-
-Add 4+ items:
-→ search_movies (12x) → add_to_stage(operation="add", items=[...12 movies...])
-→ Say: "I've staged 12 Nolan movies for your review"
-
-Delete items:
-→ get_all_movies → filter → add_to_stage(operation="remove", items=[...])
-→ Say: "I've staged X movies for removal"
-
-RESPONSE STYLES:
-
-Explore (operation="explore"):
-- Chat copy: short acknowledgement only (no title lists, no reasons, no stage IDs). Let the button speak for itself.
-- Staged items MUST still include a concise "reason" field per item (1-2 sentences max) so the Explore UI can render it.
-
-Library Management (operation="add/remove/update"):
-- Queue (1-3): "I've added X to your library"
-- Stage (4+): "I've staged X items for review"
-- Concise and action-oriented
-- No need for "reason" field in items for library operations
+For library items: set "source": "library" to skip TMDB enrichment
+For quality updates: include params={target_quality_profile_id, target_quality_profile_name}
+Use get_radarr_quality_profiles/get_sonarr_quality_profiles to match user intent ("4K", "1080p").
+Quality mapping guidance:
+- Map "4K", "UHD", "2160p" → the closest matching profile name (case-insensitive)
+- Map "1080p", "FHD" → the closest matching 1080p/FHD profile name
+No "reason" field for library operations
 
 OPERATIONS:
-- "instant" = auto-execute immediately (1-3 items, no modal)
-- "explore" = recommendations/browsing (poster mosaic UI)
-- "add" = green badge (adding to library, shows modal)
-- "remove" = red badge (deleting from library, shows modal)
-- "update" = blue badge (modifying library items, shows modal)
-
-TV SHOWS:
-- Default to Season 1 unless specified
-
-OUTPUT:
-- Always include items parameter in add_to_stage
-- Return stage_id when staging operations"""
+- "instant" = auto-execute (1-3 items, no modal)
+- "explore" = poster mosaic UI with reasons
+- "add" = green badge, shows modal
+- "remove" = red badge, shows modal
+- "update" = blue badge, shows modal"""
 
 
 # Unified tool definitions for both explore and library management
@@ -2091,7 +2031,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_movies",
-            "description": "Search for movies on TMDB with relevance ranking. Results ranked by text match, popularity, and votes. If specific search fails, try broader terms (remove year, partial title, etc).",
+            "description": "Search for movies on TMDB. Returns results ranked by relevance.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2105,7 +2045,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_shows",
-            "description": "Search for TV shows on TMDB with relevance ranking. If specific search fails, try broader terms.",
+            "description": "Search for TV shows on TMDB. Returns results ranked by relevance.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2119,7 +2059,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "search_person",
-            "description": "Search for people (actors, directors, etc.) on TMDB with relevance ranking. Last names alone work well (e.g., 'Nolan' finds Christopher Nolan). If full name fails, try last name only.",
+            "description": "Search for people (actors, directors, etc.) on TMDB. Returns results ranked by relevance.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2133,7 +2073,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_person_credits",
-            "description": "Get all movies and TV shows for a person by their TMDB ID. Returns complete filmography with ratings.",
+            "description": "Get complete filmography for a person (movies and TV shows).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2147,11 +2087,11 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_show_episodes",
-            "description": "Get detailed episode list for a TV show including which episodes you have. Requests episode data from device in real-time.",
+            "description": "Get episode list for a TV show including which episodes are in library.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "show_title": {"type": "string", "description": "Title of the TV show to get episodes for"}
+                    "show_title": {"type": "string", "description": "TV show title"}
                 },
                 "required": ["show_title"],
                 "additionalProperties": False
@@ -2161,7 +2101,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_radarr_quality_profiles",
-            "description": "Return cached Radarr quality profiles (id & name) for selecting target quality levels.",
+            "description": "Get Radarr quality profiles (id and name).",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -2173,7 +2113,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_sonarr_quality_profiles",
-            "description": "Return cached Sonarr quality profiles (id & name) for selecting target quality levels.",
+            "description": "Get Sonarr quality profiles (id and name).",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -2185,7 +2125,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_watch_history_stats",
-            "description": "Get aggregated viewing statistics from Tautulli watch history. Returns total plays, watch time, top genres, viewing patterns for recommendations.",
+            "description": "Get viewing statistics: total plays, top genres, patterns.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -2197,13 +2137,13 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_recently_watched",
-            "description": "Get recently watched content from Tautulli. Useful for understanding what user has been watching lately.",
+            "description": "Get recently watched content from Tautulli.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Number of recent items to return (default 20)", "default": 20}
+                    "limit": {"type": "integer", "description": "Number of items (default 20)", "default": 20}
                 },
-                "required": ["limit"],
+                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -2211,13 +2151,13 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_top_watched_content",
-            "description": "Get most watched content from Tautulli. Reveals user's favorite titles and viewing patterns.",
+            "description": "Get most watched content from Tautulli.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Number of top items to return (default 10)", "default": 10}
+                    "limit": {"type": "integer", "description": "Number of items (default 10)", "default": 10}
                 },
-                "required": ["limit"],
+                "required": [],
                 "additionalProperties": False
             },
             "strict": True
@@ -2225,7 +2165,7 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "get_viewing_patterns",
-            "description": "Get viewing patterns and time-based analytics from Tautulli. Shows when user watches content (by hour, day, month) and binge watching behavior.",
+            "description": "Get time-based analytics: when user watches, binge behavior.",
             "parameters": {
                 "type": "object",
                 "properties": {},
@@ -2237,13 +2177,13 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "add_instantly",
-            "description": "Execute 1-3 items (movies, shows, or people) instantly on device without confirmation modal. Device adds them immediately. Use for quick library additions.",
+            "description": "Execute 1-3 items instantly on device without modal confirmation.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "items": {
                         "type": "array",
-                        "description": "Array of 1-3 items with tmdb_id/person_id and media_type (movie, tv, or person)",
+                        "description": "1-3 items with tmdb_id and media_type",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -2263,18 +2203,18 @@ def get_unified_tools():
         {
             "type": "function",
             "name": "add_to_stage",
-            "description": "Stage items for visual display or bulk operations. Use 'explore' for poster-style recommendations, 'add' for adding to library, 'remove' for deletion, 'update' for modifications. MUST include items array.",
+            "description": "Stage items for display or bulk operations (4+ items).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["explore", "add", "remove", "update", "instant", "queue"],
-                        "description": "Operation type: explore (poster mosaic), add (green), remove (red), update (blue), instant (auto-execute)"
+                        "enum": ["explore", "add", "remove", "update"],
+                        "description": "Operation type: explore (poster mosaic), add (green), remove (red), update (blue)"
                     },
                     "items": {
                         "type": "array",
-                        "description": "Array of items with tmdb_id, media_type (movie/tv/person), and optional reason (for explore operations)",
+                        "description": "Items with tmdb_id, media_type, and optional reason (explore only)",
                         "minItems": 1,
                         "items": {
                             "type": "object",
@@ -2283,31 +2223,31 @@ def get_unified_tools():
                                 "media_type": {"type": "string", "enum": ["movie", "tv", "person"]},
                                 "reason": {
                                     "type": ["string", "null"],
-                                    "description": "Why this item is recommended (for explore operations only)"
+                                    "description": "Why recommended (explore only)"
                                 },
                                 "title": {
                                     "type": ["string", "null"],
-                                    "description": "Known title from the user's library cache"
+                                    "description": "Title from library cache"
                                 },
                                 "year": {
                                     "type": ["integer", "null"],
-                                    "description": "Release year from the user's library cache"
+                                    "description": "Year from library cache"
                                 },
                                 "tvdb_id": {
                                     "type": ["integer", "null"],
-                                    "description": "TVDB identifier (required for Sonarr operations on shows)"
+                                    "description": "TVDB ID for Sonarr"
                                 },
                                 "poster_path": {
                                     "type": ["string", "null"],
-                                    "description": "Optional poster path or URL when available"
+                                    "description": "Poster URL"
                                 },
                                 "source": {
                                     "type": ["string", "null"],
-                                    "description": "Set to \"library\" to reuse cached metadata and skip TMDB lookups"
+                                    "description": "Set to 'library' to skip TMDB lookup"
                                 },
                                 "verified": {
                                     "type": ["boolean", "null"],
-                                    "description": "True if the item metadata came from the user's library cache"
+                                    "description": "From library cache"
                                 }
                             },
                             "required": ["tmdb_id", "media_type"],
@@ -2316,7 +2256,7 @@ def get_unified_tools():
                     },
                     "params": {
                         "type": "object",
-                        "description": "Optional operation parameters (e.g., target_quality_profile_id/name for update flows)",
+                        "description": "Optional params (e.g., target_quality_profile_id/name)",
                         "additionalProperties": True
                     }
                 },
@@ -2509,7 +2449,7 @@ async def chat(
 
         input_messages = [{"role": "user", "content": request.message}]
         tools = get_unified_tools()
-        max_iterations = 25
+        max_iterations = 12
         iteration = 0
         pending_commands = []  # Track commands to send to device
         stage_id = None  # Track if any tool returned a stage_id

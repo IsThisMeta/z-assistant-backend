@@ -1638,13 +1638,13 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
         return {"movies": [], "shows": [], "error": str(e)}
 
 # Function for Responses API
-def add_to_queue(items: List[Dict], device_id: str = None) -> Dict[str, Any]:
-    """Queue 1-3 items for instant execution on device (no modal)"""
+def add_instantly(items: List[Dict], device_id: str = None) -> Dict[str, Any]:
+    """Execute 1-3 items instantly on device (no modal confirmation)"""
     if not items:
-        return {"error": "add_to_queue requires at least one item"}
+        return {"error": "add_instantly requires at least one item"}
     if len(items) > 3:
-        return {"error": "add_to_queue supports at most 3 items. Use add_to_stage for larger batches."}
-    return add_to_stage(operation="queue", items=items, device_id=device_id)
+        return {"error": "add_instantly supports at most 3 items. Use add_to_stage for larger batches."}
+    return add_to_stage(operation="instant", items=items, device_id=device_id)
 
 # Function for Responses API
 def _coerce_int(value: Any) -> Optional[int]:
@@ -1688,7 +1688,7 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
     """Add verified items to staging for bulk operations"""
     stage_id = str(uuid.uuid4())
     
-    # Enrich items with fresh TMDB data
+    # Enrich items with fresh TMDB data (skip for instant operations - device handles it)
     processed_items = []
     library_show_map: Optional[Dict[int, int]] = None
 
@@ -1699,7 +1699,8 @@ def add_to_stage(operation: str, items: List[Dict], device_id: str = None, param
         reason = item.get("reason")  # Optional reason for explore recommendations
         source = item.get("source")
         skip_tmdb = (
-            source == "library"
+            operation == "instant"  # Skip enrichment for instant operations (faster, cheaper)
+            or source == "library"
             or item.get("skip_tmdb") is True
             or item.get("skip_enrichment") is True
         )
@@ -1955,7 +1956,7 @@ LIBRARY MANAGEMENT (add/remove/update):
 - "add Ocean's 11"
 - "delete all movies under 5.0"
 - "add all Christopher Nolan movies"
-→ 1-3 items: add_to_queue(items=[...]) - instant execution
+→ 1-3 items: add_instantly(items=[...]) - instant execution, no modal
 → 4+ items: add_to_stage(operation="add/remove/update", items=[...]) - shows modal
 → When staging items that already exist in the library, include title/year/profile/poster info from the cache, set media_type, and set "source": "library" to skip redundant TMDB lookups.
 → Use get_radarr_quality_profiles / get_sonarr_quality_profiles to match user intent (e.g., “4K”, “1080p HDR”) to the correct profile id and name.
@@ -1994,7 +1995,7 @@ TMDB SEARCH RULES:
 LIBRARY OPERATIONS:
 
 Add 1-3 items:
-→ search_movies → add_to_queue(items=[{tmdb_id: 161, media_type: "movie"}])
+→ search_movies → add_instantly(items=[{tmdb_id: 161, media_type: "movie"}])
 → Say: "I've added Ocean's 11 to your library"
 
 Add 4+ items:
@@ -2018,10 +2019,11 @@ Library Management (operation="add/remove/update"):
 - No need for "reason" field in items for library operations
 
 OPERATIONS:
-- "explore" = recommendations/browsing
-- "add" = green badge (adding to library)
-- "remove" = red badge (deleting from library)
-- "update" = blue badge (modifying library items)
+- "instant" = auto-execute immediately (1-3 items, no modal)
+- "explore" = recommendations/browsing (poster mosaic UI)
+- "add" = green badge (adding to library, shows modal)
+- "remove" = red badge (deleting from library, shows modal)
+- "update" = blue badge (modifying library items, shows modal)
 
 TV SHOWS:
 - Default to Season 1 unless specified
@@ -2234,8 +2236,8 @@ def get_unified_tools():
         },
         {
             "type": "function",
-            "name": "add_to_queue",
-            "description": "Queue 1-3 items (movies, shows, or people) for instant display on device. Device shows them immediately. Use to show search results.",
+            "name": "add_instantly",
+            "description": "Execute 1-3 items (movies, shows, or people) instantly on device without confirmation modal. Device adds them immediately. Use for quick library additions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2267,8 +2269,8 @@ def get_unified_tools():
                 "properties": {
                     "operation": {
                         "type": "string",
-                        "enum": ["explore", "add", "remove", "update", "queue"],
-                        "description": "Operation type: explore (poster mosaic), add (green), remove (red), update (blue), queue (instant)"
+                        "enum": ["explore", "add", "remove", "update", "instant", "queue"],
+                        "description": "Operation type: explore (poster mosaic), add (green), remove (red), update (blue), instant (auto-execute)"
                     },
                     "items": {
                         "type": "array",
@@ -2372,8 +2374,8 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
             return get_top_watched_content(device_id, limit)
         elif function_name == "get_viewing_patterns":
             return get_viewing_patterns(device_id)
-        elif function_name == "add_to_queue":
-            return add_to_queue(arguments["items"], device_id)
+        elif function_name == "add_instantly":
+            return add_instantly(arguments["items"], device_id)
         else:
             return {"error": f"Unknown function: {function_name}"}
     except Exception as e:
@@ -2543,7 +2545,7 @@ async def chat(
 
                     result = execute_function(function_name, arguments, device_id)
 
-                    # Check if result contains a stage_id (from add_to_queue or add_to_stage)
+                    # Check if result contains a stage_id (from add_instantly or add_to_stage)
                     if isinstance(result, dict) and result.get('stage_id'):
                         stage_id = result.get('stage_id')
                         # Track operation type to determine response format

@@ -92,6 +92,7 @@ RATE_LIMIT_PRO_REQUESTS = 3  # Pro: 3 messages per 12 hours
 RATE_LIMIT_MEGA_REQUESTS = 15  # Mega: 15 messages per 12 hours
 RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
+MAX_CHAT_HISTORY_MESSAGES = int(os.getenv("MAX_CHAT_HISTORY_MESSAGES", "12"))
 
 # ====== GIGACHAD RELEVANCE RANKING ======
 # Port of the sophisticated Flutter search ranking algorithm
@@ -251,6 +252,7 @@ def rank_search_results(results: list, query: str) -> list:
 class ChatRequest(BaseModel):
     message: str
     context: Optional[str] = None  # Optional context like "explore"
+    history: Optional[List[Dict[str, str]]] = None  # Prior turns for continuity
     # NO SERVERS - Zero-knowledge architecture!
     # Backend uses library_cache from Supabase instead
 
@@ -2143,10 +2145,8 @@ def get_unified_tools():
                 "properties": {
                     "limit": {"type": "integer", "description": "Number of items (default 20)", "default": 20}
                 },
-                "required": [],
-                "additionalProperties": False
-            },
-            "strict": True
+                "required": []
+            }
         },
         {
             "type": "function",
@@ -2157,10 +2157,8 @@ def get_unified_tools():
                 "properties": {
                     "limit": {"type": "integer", "description": "Number of items (default 10)", "default": 10}
                 },
-                "required": [],
-                "additionalProperties": False
-            },
-            "strict": True
+                "required": []
+            }
         },
         {
             "type": "function",
@@ -2447,7 +2445,20 @@ async def chat(
         print(f"💬 CHAT: {request.message} (device: {device_id[:8]}...)")
         print(f"📦 ZERO-KNOWLEDGE: Backend will NEVER receive or use server credentials!")
 
-        input_messages = [{"role": "user", "content": request.message}]
+        input_messages: List[Dict[str, str]] = []
+
+        if request.history:
+            trimmed_history = request.history[-MAX_CHAT_HISTORY_MESSAGES:]
+            for entry in trimmed_history:
+                role = (entry.get("role") or "").lower()
+                content = (entry.get("content") or "").strip()
+                if role not in ("user", "assistant"):
+                    continue
+                if not content:
+                    continue
+                input_messages.append({"role": role, "content": content})
+
+        input_messages.append({"role": "user", "content": request.message.strip()})
         tools = get_unified_tools()
         max_iterations = 12
         iteration = 0

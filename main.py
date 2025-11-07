@@ -2439,15 +2439,24 @@ async def get_available_users(device_id: str):
         history = cache.get('history') or []
         selected_alias = cache.get('selected_user_alias')
 
-        # Extract unique user aliases
-        user_aliases = set()
+        # Extract unique user aliases and labels
+        user_entries: dict[str, str] = {}
         for record in history:
             alias = record.get('user_id_alias')
-            if alias:
-                user_aliases.add(alias)
+            if not alias:
+                continue
+            label = record.get('user_display_name') or alias
+            if alias not in user_entries:
+                user_entries[alias] = label
 
-        # Sort for consistent ordering
-        users = sorted(list(user_aliases))
+        # Sort for consistent ordering by label
+        users = [
+            {"alias": alias, "label": user_entries[alias]}
+            for alias in sorted(
+                user_entries.keys(),
+                key=lambda a: (user_entries[a] or "").lower()
+            )
+        ]
 
         return {
             "users": users,

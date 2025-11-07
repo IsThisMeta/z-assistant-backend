@@ -453,7 +453,18 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
         raise HTTPException(status_code=403, detail="Invalid subscription")
 
     subscriber_data = rc_response.json()
-    entitlements = subscriber_data.get("subscriber", {}).get("entitlements", {})
+    subscriber = subscriber_data.get("subscriber", {})
+    if subscriber.get("is_sandbox"):
+        logger.warning(
+            "🚫 Sandbox subscription detected for %s - rejecting",
+            rc_customer_id[:16],
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Sandbox/TestFlight subscriptions are not supported. Purchase a production Zagreus plan.",
+        )
+
+    entitlements = subscriber.get("entitlements", {})
 
     logger.info(f"🔍 Available entitlements: {list(entitlements.keys())}")
     for ent_name, ent_data in entitlements.items():
@@ -730,13 +741,36 @@ def get_sonarr_quality_profiles(device_id: str) -> Dict[str, Any]:
 
 # === WATCH HISTORY TOOLS (Tautulli Data) ===
 
+def _calculate_viewing_stats(history: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Helper to calculate viewing statistics from filtered history"""
+    if not history:
+        return {"total_plays": 0}
+
+    total_plays = len(history)
+    completed_plays = [r for r in history if r.get('completion_percent', 0) >= 90]
+    avg_completion = sum(r.get('completion_percent', 0) for r in history) / total_plays if total_plays > 0 else 0
+
+    # Extract genres
+    genres = defaultdict(int)
+    for record in history:
+        for genre in record.get('genres', []):
+            genres[genre] += 1
+
+    return {
+        "total_plays": total_plays,
+        "completed_plays": len(completed_plays),
+        "avg_completion_percent": round(avg_completion, 1),
+        "top_genres": dict(sorted(genres.items(), key=lambda x: x[1], reverse=True)[:10])
+    }
+
 def get_watch_history_stats(device_id: str) -> Dict[str, Any]:
     """Get aggregated viewing statistics from Tautulli watch history.
-    Returns total plays, watch time, top genres, viewing patterns, etc."""
+    Returns total plays, watch time, top genres, viewing patterns, etc.
+    Filters by selected user if one is set."""
     print(f"🔧 TOOL CALLED: get_watch_history_stats (device: {device_id[:8]}...)")
 
     try:
-        result = supabase.table('watch_history_cache').select('viewing_stats, synced_at, is_syncing').eq('device_id', device_id).execute()
+        result = supabase.table('watch_history_cache').select('history, viewing_stats, synced_at, is_syncing, selected_user_alias').eq('device_id', device_id).execute()
 
         if not result.data:
             return {"error": "Watch history not synced yet. Please sync your Tautulli data first."}
@@ -746,9 +780,21 @@ def get_watch_history_stats(device_id: str) -> Dict[str, Any]:
         if cache.get('is_syncing'):
             return {"error": "Watch history sync in progress. Try again in a moment."}
 
-        stats = cache.get('viewing_stats') or {}
-        synced_at = cache.get('synced_at')
+        selected_user = cache.get('selected_user_alias')
 
+        # If a user is selected, filter history and recalculate stats
+        if selected_user:
+            history = cache.get('history') or []
+            filtered_history = [r for r in history if r.get('user_id_alias') == selected_user]
+
+            # Recalculate stats for selected user only
+            stats = _calculate_viewing_stats(filtered_history)
+            stats['filtered_for_user'] = selected_user
+            print(f"  ✓ Filtered for user {selected_user}: {len(filtered_history)} plays")
+        else:
+            stats = cache.get('viewing_stats') or {}
+
+        synced_at = cache.get('synced_at')
         if synced_at:
             synced_dt = datetime.fromisoformat(synced_at)
             age_hours = (datetime.now(synced_dt.tzinfo) - synced_dt).total_seconds() / 3600
@@ -764,11 +810,12 @@ def get_watch_history_stats(device_id: str) -> Dict[str, Any]:
 
 def get_recently_watched(device_id: str, limit: int = 20) -> Dict[str, Any]:
     """Get recently watched content from Tautulli history.
-    Returns the most recent watch records with titles, dates, and completion status."""
+    Returns the most recent watch records with titles, dates, and completion status.
+    Filters by selected user if one is set."""
     print(f"🔧 TOOL CALLED: get_recently_watched - Limit: {limit} (device: {device_id[:8]}...)")
 
     try:
-        result = supabase.table('watch_history_cache').select('history, synced_at, is_syncing').eq('device_id', device_id).execute()
+        result = supabase.table('watch_history_cache').select('history, synced_at, is_syncing, selected_user_alias').eq('device_id', device_id).execute()
 
         if not result.data:
             return {"error": "Watch history not synced yet. Please sync your Tautulli data first."}
@@ -779,12 +826,18 @@ def get_recently_watched(device_id: str, limit: int = 20) -> Dict[str, Any]:
             return {"error": "Watch history sync in progress. Try again in a moment."}
 
         history = cache.get('history') or []
+        selected_user = cache.get('selected_user_alias')
+
+        # Filter by selected user if set
+        if selected_user:
+            history = [r for r in history if r.get('user_id_alias') == selected_user]
+            print(f"  ✓ Filtered for user {selected_user}")
 
         # Limit results
         recent = history[:limit] if len(history) > limit else history
 
         print(f"  ✓ Retrieved {len(recent)} recent watch records")
-        return {"history": recent, "total_records": len(history)}
+        return {"history": recent, "total_records": len(history), "filtered_for_user": selected_user}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -793,11 +846,12 @@ def get_recently_watched(device_id: str, limit: int = 20) -> Dict[str, Any]:
 
 def get_top_watched_content(device_id: str, limit: int = 10) -> Dict[str, Any]:
     """Get most watched content from Tautulli history.
-    Returns top titles sorted by play count with watch statistics."""
+    Returns top titles sorted by play count with watch statistics.
+    Filters by selected user if one is set."""
     print(f"🔧 TOOL CALLED: get_top_watched_content - Limit: {limit} (device: {device_id[:8]}...)")
 
     try:
-        result = supabase.table('watch_history_cache').select('top_content, synced_at, is_syncing').eq('device_id', device_id).execute()
+        result = supabase.table('watch_history_cache').select('history, top_content, synced_at, is_syncing, selected_user_alias').eq('device_id', device_id).execute()
 
         if not result.data:
             return {"error": "Watch history not synced yet. Please sync your Tautulli data first."}
@@ -807,13 +861,36 @@ def get_top_watched_content(device_id: str, limit: int = 10) -> Dict[str, Any]:
         if cache.get('is_syncing'):
             return {"error": "Watch history sync in progress. Try again in a moment."}
 
-        top_content = cache.get('top_content') or []
+        selected_user = cache.get('selected_user_alias')
+
+        # If user is selected, recalculate top content from filtered history
+        if selected_user:
+            history = cache.get('history') or []
+            filtered_history = [r for r in history if r.get('user_id_alias') == selected_user]
+
+            # Calculate top content from filtered history
+            title_stats = defaultdict(lambda: {"play_count": 0, "last_watched": None, "title": "", "year": None, "media_type": ""})
+            for record in filtered_history:
+                title = record.get('title', '')
+                if title:
+                    title_stats[title]["play_count"] += 1
+                    title_stats[title]["title"] = title
+                    title_stats[title]["year"] = record.get('year')
+                    title_stats[title]["media_type"] = record.get('media_type')
+                    watched_at = record.get('watched_at')
+                    if watched_at and (not title_stats[title]["last_watched"] or watched_at > title_stats[title]["last_watched"]):
+                        title_stats[title]["last_watched"] = watched_at
+
+            top_content = sorted(title_stats.values(), key=lambda x: x["play_count"], reverse=True)
+            print(f"  ✓ Filtered for user {selected_user}")
+        else:
+            top_content = cache.get('top_content') or []
 
         # Limit results
         top = top_content[:limit] if len(top_content) > limit else top_content
 
         print(f"  ✓ Retrieved {len(top)} top watched titles")
-        return {"top_content": top, "total_tracked": len(top_content)}
+        return {"top_content": top, "total_tracked": len(top_content), "filtered_for_user": selected_user}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -822,11 +899,12 @@ def get_top_watched_content(device_id: str, limit: int = 10) -> Dict[str, Any]:
 
 def get_viewing_patterns(device_id: str) -> Dict[str, Any]:
     """Get viewing patterns and analytics from Tautulli.
-    Returns time-based viewing habits (by hour, day, month) and binge sessions."""
+    Returns time-based viewing habits (by hour, day, month) and binge sessions.
+    Filters by selected user if one is set."""
     print(f"🔧 TOOL CALLED: get_viewing_patterns (device: {device_id[:8]}...)")
 
     try:
-        result = supabase.table('watch_history_cache').select('viewing_patterns, synced_at, is_syncing').eq('device_id', device_id).execute()
+        result = supabase.table('watch_history_cache').select('history, viewing_patterns, synced_at, is_syncing, selected_user_alias').eq('device_id', device_id).execute()
 
         if not result.data:
             return {"error": "Watch history not synced yet. Please sync your Tautulli data first."}
@@ -836,10 +914,17 @@ def get_viewing_patterns(device_id: str) -> Dict[str, Any]:
         if cache.get('is_syncing'):
             return {"error": "Watch history sync in progress. Try again in a moment."}
 
+        selected_user = cache.get('selected_user_alias')
+
+        # If user is selected, we could recalculate patterns, but for now just return cached
+        # TODO: Implement pattern recalculation for filtered user
         patterns = cache.get('viewing_patterns') or {}
 
+        if selected_user:
+            print(f"  ⚠ Note: Viewing patterns not yet filtered for {selected_user}")
+
         print(f"  ✓ Retrieved viewing patterns")
-        return {"patterns": patterns}
+        return {"patterns": patterns, "filtered_for_user": selected_user}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -2318,6 +2403,104 @@ def execute_function(function_name: str, arguments: dict, device_id: str) -> dic
             return {"error": f"Unknown function: {function_name}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# === USER SELECTION ENDPOINTS ===
+
+@app.get("/watch-history/available-users/{device_id}")
+async def get_available_users(device_id: str):
+    """Get list of available Tautulli user aliases from watch history.
+    Returns unique user_id_alias values found in the synced history."""
+    try:
+        # Validate UUID format
+        device_uuid = uuid.UUID(device_id)
+        device_id_str = str(device_uuid)
+
+        # Get watch history cache
+        result = supabase.table('watch_history_cache').select('history, selected_user_alias').eq('device_id', device_id_str).execute()
+
+        if not result.data:
+            return {"error": "Watch history not synced yet. Please sync your Tautulli data first.", "users": []}
+
+        cache = result.data[0]
+        history = cache.get('history') or []
+        selected_alias = cache.get('selected_user_alias')
+
+        # Extract unique user aliases
+        user_aliases = set()
+        for record in history:
+            alias = record.get('user_id_alias')
+            if alias:
+                user_aliases.add(alias)
+
+        # Sort for consistent ordering
+        users = sorted(list(user_aliases))
+
+        return {
+            "users": users,
+            "selected_user_alias": selected_alias,
+            "total_users": len(users)
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid device ID format")
+    except Exception as e:
+        logger.error(f"Error getting available users: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class SelectUserRequest(BaseModel):
+    device_id: str
+    user_alias: str
+
+@app.post("/watch-history/select-user")
+async def select_user(request: SelectUserRequest):
+    """Save the selected Tautulli user alias for this device.
+    This tells the AI which user's viewing history to focus on."""
+    try:
+        # Validate UUID format
+        device_uuid = uuid.UUID(request.device_id)
+        device_id = str(device_uuid)
+
+        # Verify the user alias exists in the history
+        result = supabase.table('watch_history_cache').select('history').eq('device_id', device_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Watch history not found for this device")
+
+        history = result.data[0].get('history') or []
+
+        # Check if the alias exists
+        available_aliases = set(record.get('user_id_alias') for record in history if record.get('user_id_alias'))
+
+        if request.user_alias not in available_aliases:
+            raise HTTPException(
+                status_code=400,
+                detail=f"User alias '{request.user_alias}' not found in watch history. Available: {sorted(available_aliases)}"
+            )
+
+        # Update the selected user alias
+        supabase.table('watch_history_cache').update({
+            'selected_user_alias': request.user_alias,
+            'updated_at': datetime.now(timezone.utc).isoformat()
+        }).eq('device_id', device_id).execute()
+
+        logger.info(f"✅ Device {device_id[:8]}... selected user alias: {request.user_alias}")
+
+        return {
+            "success": True,
+            "selected_user_alias": request.user_alias,
+            "message": f"Successfully set primary user to {request.user_alias}"
+        }
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid device ID format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error selecting user: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 class DeviceRegisterRequest(BaseModel):
     device_id: str

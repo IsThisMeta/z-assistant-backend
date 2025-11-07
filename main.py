@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
 from openai import OpenAI
 import httpx
@@ -24,6 +25,15 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+class RateLimitReached(Exception):
+    """Raised when a device exceeds its allowed request budget."""
+
+    def __init__(self, detail: str, retry_after: Optional[int] = None, tier: Optional[str] = None):
+        super().__init__(detail)
+        self.detail = detail
+        self.retry_after = retry_after
+        self.tier = tier
 
 # Load environment variables
 load_dotenv()
@@ -613,10 +623,11 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
 
                 time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
-                raise HTTPException(
-                    status_code=429,
-                    detail=f"Rate limit exceeded for your plan. Try again in {time_str}.",
-                    headers={"Retry-After": str(retry_after)}
+                detail = f"Rate limit exceeded for your plan. Try again in {time_str}."
+                raise RateLimitReached(
+                    detail=detail,
+                    retry_after=retry_after,
+                    tier=tier_name
                 )
 
         # Add current request with timestamp as score
@@ -628,6 +639,8 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
 
         print(f"✅ Rate limit check passed for {device_id[:8]}... [{tier_name}]: {count + 1}/{limit}")
 
+    except RateLimitReached:
+        raise
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
@@ -2622,7 +2635,23 @@ async def chat(
 ):
     """Unified chat endpoint - handles both explore and library management"""
     device_id, hmac_key, rc_customer_id = device_auth
-    await check_rate_limit(device_id, rc_customer_id)
+    try:
+        await check_rate_limit(device_id, rc_customer_id)
+    except RateLimitReached as rl:
+        rate_limit_info = {"detail": rl.detail}
+        if rl.retry_after is not None:
+            rate_limit_info["retry_after_seconds"] = rl.retry_after
+        if rl.tier:
+            rate_limit_info["tier"] = rl.tier
+
+        return JSONResponse(
+            status_code=200,
+            content={
+                "response": "Rate Limit Reached",
+                "rate_limited": True,
+                "rate_limit": rate_limit_info
+            }
+        )
 
     try:
         print(f"💬 CHAT: {request.message} (device: {device_id[:8]}...)")

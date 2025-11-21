@@ -534,7 +534,7 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
 
     if not tier:
         logger.warning(f"No active subscription found for {rc_customer_id[:16]}...")
-        raise HTTPException(status_code=403, detail="Zagreus Pro, Mega, or Ultra subscription required")
+        raise HTTPException(status_code=403, detail="Zagreus Mega or Ultra subscription required")
 
     logger.info(
         "✅ Verified %s subscription for %s (expires %s)",
@@ -570,20 +570,17 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
 
         tier = cached_data.get("tier")
 
-        # Determine rate limit based on tier
+        # Determine rate limit based on tier (Mega/Ultra only)
         if tier in ('mega', 'ultra'):
             limit = RATE_LIMIT_MEGA_REQUESTS
             tier_name = f"{tier.capitalize()}"
             logger.info("✅ %s recognized as %s tier", device_id[:8], tier.capitalize())
-        elif tier == 'pro':
-            limit = RATE_LIMIT_PRO_REQUESTS
-            tier_name = "Pro"
-            logger.info("✅ %s recognized as Pro tier", device_id[:8])
         else:
-            logger.warning(f"🚫 Unknown tier '{tier}' for {device_id[:8]}")
+            # Pro tier no longer has AI access
+            logger.warning(f"🚫 AI access denied for tier '{tier}' on device {device_id[:8]}")
             raise HTTPException(
                 status_code=403,
-                detail="Invalid subscription tier"
+                detail="AI features require Mega or Ultra subscription"
             )
 
     except HTTPException:
@@ -1082,8 +1079,14 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         print("  → Calling OpenAI for deep cuts generation...")
         print(f"  → Context length: {len(context)} chars")
 
-        # Select model based on subscription tier
-        model = "gpt-5.1" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        # Select model based on subscription tier (binary: mega or ultra only)
+        tier_lower = subscription_tier.lower()
+        if tier_lower == "ultra":
+            model = "gpt-5.1"
+        elif tier_lower == "mega":
+            model = "gpt-5-mini"
+        else:
+            raise ValueError(f"Invalid subscription tier: {subscription_tier}. Must be 'mega' or 'ultra'.")
         print(f"  → Using model: {model}")
 
         # Call OpenAI with Responses API (required for GPT-5)
@@ -2811,6 +2814,13 @@ async def generate_deep_cuts_endpoint(
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+
+    # Validate tier is mega or ultra only
+    if subscription_tier not in ("mega", "ultra"):
+        raise HTTPException(
+            status_code=403,
+            detail="Deep cuts generation requires Mega or Ultra subscription"
+        )
 
     try:
         print(f"🎬 Deep Cuts generation requested for device {device_id[:8]}...")

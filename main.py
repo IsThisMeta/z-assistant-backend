@@ -992,7 +992,7 @@ def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict
 
     Args:
         device_id: Device identifier
-        subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5)
+        subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5.1)
     """
 
     print(f"\n🎬 DEEP CUTS GENERATION STARTED for device {device_id[:8]}...")
@@ -1083,7 +1083,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         print(f"  → Context length: {len(context)} chars")
 
         # Select model based on subscription tier
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.1" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
         print(f"  → Using model: {model}")
 
         # Call OpenAI with Responses API (required for GPT-5)
@@ -2807,7 +2807,7 @@ async def generate_deep_cuts_endpoint(
     """Generate AI-powered deep cuts recommendations for Mega/Ultra users.
 
     This endpoint triggers weekly deep cuts generation based on library + watch history.
-    Mega users get gpt-5-mini, Ultra users get gpt-5."""
+    Mega users get gpt-5-mini, Ultra users get gpt-5.1."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()

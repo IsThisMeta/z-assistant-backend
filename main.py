@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import uuid
 import json
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -98,9 +99,9 @@ except Exception as e:
 RC_CACHE_TTL = 21600
 
 # Rate limiting configuration - Tier-based
-RATE_LIMIT_PRO_REQUESTS = 3  # Pro: 3 messages per 12 hours
-RATE_LIMIT_MEGA_REQUESTS = 15  # Mega: 15 messages per 12 hours
-RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
+RATE_LIMIT_PRO_REQUESTS = 3  # Pro: 3 messages per 12 hours (deprecated - Pro no longer has AI access)
+RATE_LIMIT_DAILY_REQUESTS = 20  # Mega/Ultra: 20 messages per day (resets at midnight ET)
+RATE_LIMIT_TIMEZONE = ZoneInfo("America/New_York")  # Eastern Time
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 MAX_CHAT_HISTORY_MESSAGES = int(os.getenv("MAX_CHAT_HISTORY_MESSAGES", "12"))
 
@@ -572,7 +573,7 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
 
         # Determine rate limit based on tier (Mega/Ultra only)
         if tier in ('mega', 'ultra'):
-            limit = RATE_LIMIT_MEGA_REQUESTS
+            limit = RATE_LIMIT_DAILY_REQUESTS
             tier_name = f"{tier.capitalize()}"
             logger.info("✅ %s recognized as %s tier", device_id[:8], tier.capitalize())
         else:
@@ -592,49 +593,48 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
             detail="Failed to verify subscription"
         )
 
-    # Use Redis sorted set for time-based rate limiting
-    # Key format: ratelimit_rc:{rc_customer_id}
+    # Use Redis sorted set for daily rate limiting (resets at midnight ET)
+    # Key format: ratelimit_rc:{rc_customer_id}:YYYY-MM-DD
     # Score: timestamp
     # Value: unique request ID
     # All devices with same RC subscription share the rate limit
-    key = f"ratelimit_rc:{rc_customer_id}"
-    now = time.time()
-    window_start = now - RATE_LIMIT_WINDOW
+
+    # Get current time in Eastern Time
+    now_et = datetime.now(RATE_LIMIT_TIMEZONE)
+    today_date = now_et.strftime("%Y-%m-%d")
+    key = f"ratelimit_rc:{rc_customer_id}:{today_date}"
+
+    # Calculate next midnight in ET
+    next_midnight_et = (now_et + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds_until_midnight = int((next_midnight_et - now_et).total_seconds())
 
     try:
-        # Remove old entries outside the time window
-        redis_client.zremrangebyscore(key, 0, window_start)
-
-        # Count requests in current window
+        # Count requests today
         count = redis_client.zcard(key)
 
         # Check if limit exceeded
         if count >= limit:
-            # Get the oldest request timestamp
-            oldest = redis_client.zrange(key, 0, 0, withscores=True)
-            if oldest:
-                oldest_time = oldest[0][1]
-                retry_after = int(oldest_time + RATE_LIMIT_WINDOW - now)
-                hours = retry_after // 3600
-                minutes = (retry_after % 3600) // 60
+            hours = seconds_until_midnight // 3600
+            minutes = (seconds_until_midnight % 3600) // 60
 
-                time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
+            time_str = f"{hours}h {minutes}m" if hours > 0 else f"{minutes}m"
 
-                detail = f"Rate limit exceeded for your plan. Try again in {time_str}."
-                raise RateLimitReached(
-                    detail=detail,
-                    retry_after=retry_after,
-                    tier=tier_name
-                )
+            detail = f"Daily limit reached ({limit} messages/day). Resets in {time_str} (midnight ET)."
+            raise RateLimitReached(
+                detail=detail,
+                retry_after=seconds_until_midnight,
+                tier=tier_name
+            )
 
         # Add current request with timestamp as score
-        request_id = f"{now}:{uuid.uuid4()}"
-        redis_client.zadd(key, {request_id: now})
+        now_timestamp = time.time()
+        request_id = f"{now_timestamp}:{uuid.uuid4()}"
+        redis_client.zadd(key, {request_id: now_timestamp})
 
-        # Set expiry on the key (cleanup after window expires)
-        redis_client.expire(key, RATE_LIMIT_WINDOW)
+        # Set expiry on the key to expire after next midnight + 1 hour buffer
+        redis_client.expire(key, seconds_until_midnight + 3600)
 
-        print(f"✅ Rate limit check passed for {device_id[:8]}... [{tier_name}]: {count + 1}/{limit}")
+        print(f"✅ Rate limit check passed for {device_id[:8]}... [{tier_name}]: {count + 1}/{limit} (resets at midnight ET)")
 
     except RateLimitReached:
         raise

@@ -2531,6 +2531,95 @@ class DeviceRegisterRequest(BaseModel):
     user_id: Optional[str] = None  # Supabase user ID for tier-based rate limiting
     subscription_tier: Optional[str] = None  # Client-reported tier hint (optional)
 
+class UserPreferences(BaseModel):
+    hide_modules_tab: Optional[bool] = False
+    hide_calendar_tab: Optional[bool] = False
+
+class UpdatePreferencesRequest(BaseModel):
+    hide_modules_tab: Optional[bool] = None
+    hide_calendar_tab: Optional[bool] = None
+
+@app.get("/preferences/{device_id}")
+async def get_preferences(
+    device_id: str,
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Get user preferences for UI customization"""
+    try:
+        # Validate device_id matches authenticated device
+        auth_device_id = device_auth[0]
+        if device_id != auth_device_id:
+            raise HTTPException(status_code=403, detail="Device ID mismatch")
+
+        # Get preferences from device_keys table
+        result = supabase.table('device_keys').select('preferences').eq('device_id', device_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        preferences = result.data[0].get('preferences', {})
+        if not preferences:
+            preferences = {
+                'hide_modules_tab': False,
+                'hide_calendar_tab': False
+            }
+
+        return preferences
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching preferences: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch preferences")
+
+@app.post("/preferences/{device_id}")
+async def update_preferences(
+    device_id: str,
+    request: UpdatePreferencesRequest,
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Update user preferences for UI customization"""
+    try:
+        # Validate device_id matches authenticated device
+        auth_device_id = device_auth[0]
+        if device_id != auth_device_id:
+            raise HTTPException(status_code=403, detail="Device ID mismatch")
+
+        # Get current preferences
+        result = supabase.table('device_keys').select('preferences').eq('device_id', device_id).execute()
+
+        if not result.data:
+            raise HTTPException(status_code=404, detail="Device not found")
+
+        # Merge with existing preferences
+        current_prefs = result.data[0].get('preferences', {})
+        if not current_prefs:
+            current_prefs = {
+                'hide_modules_tab': False,
+                'hide_calendar_tab': False
+            }
+
+        # Update only provided fields
+        if request.hide_modules_tab is not None:
+            current_prefs['hide_modules_tab'] = request.hide_modules_tab
+        if request.hide_calendar_tab is not None:
+            current_prefs['hide_calendar_tab'] = request.hide_calendar_tab
+
+        # Save updated preferences
+        supabase.table('device_keys').update({
+            'preferences': current_prefs
+        }).eq('device_id', device_id).execute()
+
+        logger.info(f"✅ Updated preferences for device {device_id[:8]}...")
+
+        return {"status": "success", "preferences": current_prefs}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating preferences: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update preferences")
+
 @app.post("/device/register")
 async def register_device(request: DeviceRegisterRequest):
     """Register a new device with its HMAC key - verifies Pro/Mega subscription via RevenueCat"""

@@ -81,3 +81,85 @@ CREATE INDEX idx_episode_cache_device_show ON episode_cache(device_id, show_titl
 - Backend never calls Sonarr API
 - Device does all the work
 - Backend only orchestrates via Supabase
+
+---
+
+## Show Recommendations ("Up Next" Feature)
+
+### 3. `show_recommendations_cache`
+Stores AI-generated show recommendations for Mega/Ultra users. Similar to `deep_cuts_cache` but for TV shows.
+
+```sql
+CREATE TABLE IF NOT EXISTS show_recommendations_cache (
+    device_id UUID PRIMARY KEY REFERENCES devices(device_id) ON DELETE CASCADE,
+    recommendations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    generated_at TIMESTAMPTZ,
+    next_generation_at TIMESTAMPTZ,
+    is_generating BOOLEAN DEFAULT FALSE,
+    generation_started_at TIMESTAMPTZ,
+    generation_duration_ms INTEGER,
+    prompt_version TEXT DEFAULT 'v1',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_show_recommendations_device_id
+ON show_recommendations_cache(device_id);
+
+CREATE INDEX IF NOT EXISTS idx_show_recommendations_next_gen
+ON show_recommendations_cache(next_generation_at);
+
+ALTER TABLE show_recommendations_cache ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Devices can view own show recommendations"
+ON show_recommendations_cache FOR SELECT
+USING (device_id = current_setting('request.jwt.claims.device_id')::UUID);
+
+CREATE POLICY "Devices can update own show recommendations"
+ON show_recommendations_cache FOR UPDATE
+USING (device_id = current_setting('request.jwt.claims.device_id')::UUID);
+
+CREATE POLICY "Devices can insert own show recommendations"
+ON show_recommendations_cache FOR INSERT
+WITH CHECK (device_id = current_setting('request.jwt.claims.device_id')::UUID);
+```
+
+## Recommendation Data Format
+
+```json
+{
+  "recommendations": [
+    {
+      "title": "The Bear",
+      "year": 2022,
+      "genres": ["Drama", "Comedy"],
+      "reason": "Matches your love for character-driven dramas with strong ensemble casts",
+      "popularity_score": 9,
+      "seasons": 3,
+      "tmdb_id": 136315,
+      "poster_path": "/rS4f6MYLXyWjJi96kAGWVINmC96.jpg"
+    }
+  ]
+}
+```
+
+## API Endpoints
+
+- **POST** `/recommendations/up-next/generate` - Triggers weekly show recommendation generation
+  - Requires: Device authentication + subscription verification (Mega/Ultra)
+  - Headers: `X-Subscription-Tier: mega|ultra`
+  - Returns: Generation status, recommendation count, duration
+
+- **GET** `/recommendations/up-next` - Retrieves cached recommendations
+  - Requires: Device authentication
+  - Returns: Recommendations array, timestamps, generation status
+
+## Generation Flow
+
+1. User triggers generation (or weekly automated job)
+2. Backend fetches library shows + watch history from cache
+3. AI analyzes viewing patterns and generates 10-15 show recommendations
+4. Filters out shows already in library (popularity_score >= 6)
+5. Enriches with TMDB data (posters, IDs) using `/search/tv`
+6. Stores in `show_recommendations_cache` with 7-day refresh cycle
+7. Client displays recommendations with "Up Next" UI

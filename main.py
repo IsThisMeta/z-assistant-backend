@@ -1567,6 +1567,1024 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
         return {"error": str(e)}
 
 
+# ============================================================================
+# MAGIC RECOMMENDATIONS - Dynamic themed sections with AI-generated titles
+# ============================================================================
+
+MAGIC_MOVIES_PROMPT = """You are a creative film curator who creates DYNAMICALLY THEMED movie recommendation sections.
+
+Your task: Analyze the user's library and viewing patterns, then CREATE A UNIQUE THEME and recommend 8-12 movies matching that theme.
+
+IMPORTANT: You must CREATE THE SECTION TITLE AND THEME yourself based on patterns you detect!
+
+EXAMPLE THEMES YOU MIGHT CREATE:
+- "Neon-Soaked Cyberpunk" (if they love Blade Runner, Ghost in the Shell, tech-noir)
+- "A24 Indie Darlings" (if they have A24 films, slow-burn character studies)
+- "Heist Films with Style" (if they love Ocean's 11, Italian Job, stylish crime)
+- "Wes Anderson's Quirky Universe" (specific director/style focus)
+- "90s Neo-Noir Gems" (decade + genre combo)
+- "Elevated Horror" (if they like A24/Blumhouse cerebral horror)
+- "Samurai Cinema Classics" (if Asian cinema + action in library)
+- "Psychological Thrillers That Twist" (if they love mindfuck movies)
+- "Space Opera Epics" (if sci-fi + grand scale in library)
+- "British Kitchen Sink Realism" (specific movement/geography)
+
+ANALYZE FOR:
+- Studios they favor (A24, Blumhouse, Pixar, Miramax, etc.)
+- Directors/auteurs in their library
+- Specific genres or sub-genres (neo-noir, folk horror, mumblecore, etc.)
+- Decades/eras (70s paranoia thrillers, 80s action, 90s indie, etc.)
+- Visual styles (neon aesthetics, black & white, handheld, etc.)
+- Tone patterns (dark comedy, melodrama, gritty realism, etc.)
+
+AVOID:
+- Generic themes like "Great Movies" or "Must-Watch Films"
+- Movies already in their library
+- Movies recommended in the last 8 weeks (provided in excluded_titles)
+
+OUTPUT FORMAT (JSON):
+{
+  "section_title": "Your Creative Section Title",
+  "section_theme": "One sentence describing the theme/vibe",
+  "recommendations": [
+    {
+      "title": "Film Title",
+      "year": 2015,
+      "director": "Director Name",
+      "genres": ["Genre1", "Genre2"],
+      "reason": "Why this fits the theme",
+      "relevance_score": 8
+    }
+  ]
+}
+
+The relevance_score (1-10) indicates how well it matches YOUR chosen theme:
+- 9-10 = Perfect embodiment of the theme
+- 6-8 = Good fit for the theme
+- 1-5 = Weak fit (avoid these)
+
+BE CREATIVE. BE SPECIFIC. Make the section feel curated and intentional!"""
+
+MAGIC_MOVIES_CAST_CREW_PROMPT = """You are a film curator specializing in PEOPLE-BASED recommendations using cast and crew.
+
+Your task: Analyze the user's library, identify KEY PEOPLE (actors, directors, cinematographers, composers, etc.) they love, then create a themed section around those people's filmographies.
+
+IMPORTANT: You must CREATE THE SECTION TITLE based on the people you choose!
+
+EXAMPLE SECTION TITLES:
+- "The Fincher Universe" (David Fincher films)
+- "Character Actors You Love: Philip Seymour Hoffman Edition" (specific actor)
+- "Roger Deakins Cinematography Masterclass" (cinematographer)
+- "Trent Reznor & Atticus Ross Soundtracks" (composers)
+- "The Coen Brothers Extended Family" (frequent collaborators)
+- "Michael Shannon's Intensity" (specific actor's range)
+- "Denis Villeneuve's Vision" (director focus)
+- "Composers Who Score: Jonny Greenwood" (musician/composer)
+- "The Wes Anderson Repertory Company" (ensemble cast across films)
+
+You have access to PEOPLE OBJECTS with filmographies. Analyze:
+- Which actors appear most in their library
+- Which directors they favor
+- Cinematographers, composers, editors they might love
+- Frequent collaborators (actor-director pairings)
+
+AVOID:
+- Movies already in their library
+- Movies recommended in the last 8 weeks (provided in excluded_titles)
+- People with tiny filmographies (need substantial work to recommend)
+
+OUTPUT FORMAT (JSON):
+{
+  "section_title": "Your People-Based Section Title",
+  "featured_people": [
+    {
+      "name": "Person Name",
+      "role": "Director/Actor/Cinematographer/etc.",
+      "tmdb_id": 1234
+    }
+  ],
+  "recommendations": [
+    {
+      "title": "Film Title",
+      "year": 2015,
+      "director": "Director Name",
+      "genres": ["Genre1", "Genre2"],
+      "reason": "How this person's work shines in this film",
+      "relevance_score": 9,
+      "featured_person": "Which person from featured_people is in this"
+    }
+  ]
+}
+
+BE CREATIVE. Focus on 1-3 people max. Make it feel like a deep dive into their work!"""
+
+MAGIC_SHOWS_PROMPT = """You are a creative TV curator who creates DYNAMICALLY THEMED show recommendation sections.
+
+Your task: Analyze the user's library and viewing patterns, then CREATE A UNIQUE THEME and recommend 8-12 shows matching that theme.
+
+IMPORTANT: You must CREATE THE SECTION TITLE AND THEME yourself based on patterns you detect!
+
+EXAMPLE THEMES YOU MIGHT CREATE:
+- "Prestige Crime Dramas" (if they love True Detective, The Wire, Fargo)
+- "British Comedy Gold" (if they favor UK comedies)
+- "Peak TV Anthology Series" (if they like Black Mirror, American Horror Story)
+- "Workplace Comedies with Heart" (The Office, Parks & Rec vibes)
+- "Slow-Burn Character Studies" (Mad Men, Succession style)
+- "Genre-Bending Sci-Fi" (Westworld, Severance, weird sci-fi)
+- "Limited Series Perfection" (tight storytelling, 1 season wonders)
+- "Showrunner Auteurs: Ryan Murphy" (specific creator focus)
+- "Peak Streaming Originals" (Netflix/HBO/Apple prestige shows)
+- "International Thrillers" (Nordic noir, Korean drama, etc.)
+
+ANALYZE FOR:
+- Networks/streamers they favor (HBO, FX, Netflix, BBC, etc.)
+- Showrunners/creators in their library
+- Specific genres or formats (anthology, limited series, procedural, etc.)
+- Eras (Golden Age, Peak TV, etc.)
+- Tone patterns (dark comedy, prestige drama, cozy mystery, etc.)
+- International vs domestic preferences
+
+AVOID:
+- Generic themes like "Great Shows" or "Must-Watch TV"
+- Shows already in their library
+- Shows recommended in the last 8 weeks (provided in excluded_titles)
+
+OUTPUT FORMAT (JSON):
+{
+  "section_title": "Your Creative Section Title",
+  "section_theme": "One sentence describing the theme/vibe",
+  "recommendations": [
+    {
+      "title": "Show Title",
+      "year": 2020,
+      "genres": ["Drama", "Thriller"],
+      "reason": "Why this fits the theme",
+      "relevance_score": 8,
+      "seasons": 3
+    }
+  ]
+}
+
+The relevance_score (1-10) indicates how well it matches YOUR chosen theme:
+- 9-10 = Perfect embodiment of the theme
+- 6-8 = Good fit for the theme
+- 1-5 = Weak fit (avoid these)
+
+BE CREATIVE. BE SPECIFIC. Make the section feel curated and intentional!"""
+
+MAGIC_SHOWS_CAST_CREW_PROMPT = """You are a TV curator specializing in PEOPLE-BASED recommendations using cast, creators, and crew.
+
+Your task: Analyze the user's library, identify KEY PEOPLE (actors, showrunners, directors, etc.) they love, then create a themed section around those people's TV work.
+
+IMPORTANT: You must CREATE THE SECTION TITLE based on the people you choose!
+
+EXAMPLE SECTION TITLES:
+- "Ryan Murphy's World" (showrunner focus)
+- "The Tatiana Maslany Experience" (specific actor)
+- "Mike Flanagan's Horror Universe" (creator/director)
+- "The Vince Gilligan Extended Universe" (Breaking Bad, Better Call Saul creator)
+- "Peak TV Directors: Cary Fukunaga" (True Detective S1, Maniac)
+- "Elisabeth Moss Does Drama" (actress across shows)
+- "The FX Auteur Showcase" (network-specific creators)
+- "Composers of Prestige TV: Max Richter" (TV composers)
+- "British Acting Royalty: Olivia Colman" (international talent)
+
+You have access to PEOPLE OBJECTS with TV filmographies. Analyze:
+- Which actors appear most in their show library
+- Which showrunners/creators they favor
+- Directors who do episodic work they might love
+- Composers, cinematographers in TV
+
+AVOID:
+- Shows already in their library
+- Shows recommended in the last 8 weeks (provided in excluded_titles)
+- People with limited TV work (need substantial shows to recommend)
+
+OUTPUT FORMAT (JSON):
+{
+  "section_title": "Your People-Based Section Title",
+  "featured_people": [
+    {
+      "name": "Person Name",
+      "role": "Showrunner/Actor/Director/etc.",
+      "tmdb_id": 1234
+    }
+  ],
+  "recommendations": [
+    {
+      "title": "Show Title",
+      "year": 2020,
+      "genres": ["Drama"],
+      "reason": "How this person's work shines in this show",
+      "relevance_score": 9,
+      "seasons": 4,
+      "featured_person": "Which person from featured_people is in this"
+    }
+  ]
+}
+
+BE CREATIVE. Focus on 1-3 people max. Make it feel like exploring their TV career!"""
+
+
+def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered DYNAMIC themed movie recommendations with 8-week history tracking."""
+
+    print(f"\n🎬✨ MAGIC MOVIES GENERATION STARTED for device {device_id[:8]}...")
+    print(f"  → Subscription tier: {subscription_tier.upper()}")
+    start_time = time.time()
+
+    try:
+        # Check if generation is already in progress
+        existing = supabase.table('magic_movies_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+
+        if existing.data:
+            cache = existing.data[0]
+
+            if cache.get('is_generating'):
+                print("  ⏭️  Generation already in progress")
+                return {"error": "Generation already in progress. Please wait."}
+
+            # Check if we need to regenerate (> 7 days old)
+            if cache.get('generated_at'):
+                last_gen = datetime.fromisoformat(cache['generated_at'])
+                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+
+                if age_days < 7:
+                    print(f"  ℹ️  Magic Movies generated {age_days:.1f} days ago - no regeneration needed")
+                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+
+        # Mark as generating
+        supabase.table('magic_movies_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+
+        # Fetch library
+        library_result = supabase.table('library_cache').select('movies').eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            supabase.table('magic_movies_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            return {"error": "Library not synced. Please sync your library first."}
+
+        library = library_result.data[0]
+        movies_in_library = library.get('movies', [])
+
+        # Get 8-week history to exclude
+        history = existing.data[0].get('history', []) if existing.data else []
+        excluded_titles = [item['title'] for item in history if 'title' in item]
+
+        print(f"  ✓ Found {len(movies_in_library)} movies in library")
+        print(f"  → Excluding {len(excluded_titles)} titles from last 8 weeks")
+
+        # Build AI context with exclusions
+        library_genres = {}
+        library_studios = {}
+        library_directors = {}
+
+        for movie in movies_in_library[:150]:
+            for genre in movie.get('genres', []):
+                library_genres[genre] = library_genres.get(genre, 0) + 1
+            studio = movie.get('studio', '')
+            if studio:
+                library_studios[studio] = library_studios.get(studio, 0) + 1
+            director = movie.get('director', '')
+            if director:
+                library_directors[director] = library_directors.get(director, 0) + 1
+
+        top_genres = sorted(library_genres.items(), key=lambda x: x[1], reverse=True)[:8]
+        top_studios = sorted(library_studios.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_directors = sorted(library_directors.items(), key=lambda x: x[1], reverse=True)[:10]
+
+        context = f"""LIBRARY ANALYSIS:
+- Total Movies: {len(movies_in_library)}
+- Top Genres: {', '.join([f"{g[0]} ({g[1]})" for g in top_genres])}
+- Top Studios: {', '.join([f"{s[0]} ({s[1]})" for s in top_studios]) if top_studios else 'N/A'}
+- Top Directors: {', '.join([f"{d[0]} ({d[1]})" for d in top_directors[:5]]) if top_directors else 'N/A'}
+
+EXCLUDED TITLES (last 8 weeks):
+{', '.join(excluded_titles[:20]) if excluded_titles else 'None'}
+
+Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in their library and NOT in excluded titles."""
+
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+
+        response = openai_client.responses.create(
+            model=model,
+            instructions=MAGIC_MOVIES_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "magic_movies",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "section_theme": {"type": "string"},
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "director": {"type": ["string", "null"]},
+                                        "genres": {"type": "array", "items": {"type": "string"}},
+                                        "reason": {"type": "string"},
+                                        "relevance_score": {"type": "integer"}
+                                    },
+                                    "required": ["title", "year", "director", "genres", "reason", "relevance_score"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["section_title", "section_theme", "recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+
+        # Extract response
+        result_data = None
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_data = json.loads(content_item.text)
+                        break
+                break
+
+        if not result_data:
+            raise ValueError("No data in OpenAI response")
+
+        section_title = result_data.get('section_title', 'Magic Movies')
+        section_theme = result_data.get('section_theme', '')
+        recommendations = result_data.get('recommendations', [])
+
+        # Filter and enrich
+        library_titles = {m.get('title', '').lower() for m in movies_in_library}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('title', '').lower() not in library_titles
+            and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
+            and rec.get('relevance_score', 0) >= 6
+        ]
+
+        # TMDB enrichment
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                search_url = "https://api.themoviedb.org/3/search/movie"
+                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
+                if rec.get('year'):
+                    params["year"] = rec['year']
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200 and response.json().get("results"):
+                    movie = response.json()["results"][0]
+                    rec['tmdb_id'] = movie.get('id')
+                    rec['poster_path'] = movie.get('poster_path', '')
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                enriched_recs.append(rec)
+            except Exception:
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        # Update history (keep last 8 weeks)
+        new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
+        updated_history = new_history_items + history
+
+        # Filter history to last 8 weeks
+        eight_weeks_ago = datetime.now() - timedelta(weeks=8)
+        updated_history = [
+            item for item in updated_history
+            if datetime.fromisoformat(item['added_at']) > eight_weeks_ago
+        ][:100]  # Cap at 100 items
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        next_gen = datetime.now() + timedelta(days=7)
+
+        supabase.table('magic_movies_cache').upsert({
+            'device_id': device_id,
+            'section_title': section_title,
+            'section_theme': section_theme,
+            'recommendations': enriched_recs,
+            'history': updated_history,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+
+        print(f"\n✅ MAGIC MOVIES GENERATED: \"{section_title}\" ({duration_ms}ms)")
+        print(f"  → {len(enriched_recs)} recommendations")
+
+        return {
+            "status": "success",
+            "section_title": section_title,
+            "recommendations_count": len(enriched_recs),
+            "generation_duration_ms": duration_ms
+        }
+
+    except Exception as e:
+        print(f"❌ ERROR generating magic movies: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            supabase.table('magic_movies_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+        except:
+            pass
+        return {"error": str(e)}
+
+
+def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered PEOPLE-BASED movie recommendations with 8-week history tracking."""
+
+    print(f"\n🎬👥 MAGIC MOVIES CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
+    start_time = time.time()
+
+    try:
+        existing = supabase.table('magic_movies_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+
+        if existing.data:
+            cache = existing.data[0]
+            if cache.get('is_generating'):
+                return {"error": "Generation already in progress. Please wait."}
+
+            if cache.get('generated_at'):
+                last_gen = datetime.fromisoformat(cache['generated_at'])
+                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+                if age_days < 7:
+                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+
+        supabase.table('magic_movies_cast_crew_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+
+        # Fetch library and people
+        library_result = supabase.table('library_cache').select('movies').eq('device_id', device_id).execute()
+        people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            supabase.table('magic_movies_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            return {"error": "Library not synced."}
+
+        movies_in_library = library_result.data[0].get('movies', [])
+        people = people_result.data[0].get('people', []) if people_result.data else []
+
+        history = existing.data[0].get('history', []) if existing.data else []
+        excluded_titles = [item['title'] for item in history if 'title' in item]
+
+        # Build people context
+        people_sample = people[:30] if people else []
+        people_str = '\n'.join([f"- {p.get('name', 'Unknown')} ({p.get('role', 'Unknown')})" for p in people_sample])
+
+        context = f"""LIBRARY ANALYSIS:
+- Total Movies: {len(movies_in_library)}
+
+PEOPLE IN LIBRARY (sample):
+{people_str if people_str else 'No people data available'}
+
+EXCLUDED TITLES (last 8 weeks):
+{', '.join(excluded_titles[:20]) if excluded_titles else 'None'}
+
+Pick 1-3 key people and create a themed section around their filmography."""
+
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+
+        response = openai_client.responses.create(
+            model=model,
+            instructions=MAGIC_MOVIES_CAST_CREW_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "magic_movies_cast_crew",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "featured_people": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "role": {"type": "string"},
+                                        "tmdb_id": {"type": "integer"}
+                                    },
+                                    "required": ["name", "role", "tmdb_id"],
+                                    "additionalProperties": False
+                                }
+                            },
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "director": {"type": ["string", "null"]},
+                                        "genres": {"type": "array", "items": {"type": "string"}},
+                                        "reason": {"type": "string"},
+                                        "relevance_score": {"type": "integer"},
+                                        "featured_person": {"type": "string"}
+                                    },
+                                    "required": ["title", "year", "director", "genres", "reason", "relevance_score", "featured_person"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["section_title", "featured_people", "recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+
+        result_data = None
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_data = json.loads(content_item.text)
+                        break
+                break
+
+        if not result_data:
+            raise ValueError("No data in OpenAI response")
+
+        section_title = result_data.get('section_title', 'Magic Cast & Crew')
+        featured_people = result_data.get('featured_people', [])
+        recommendations = result_data.get('recommendations', [])
+
+        library_titles = {m.get('title', '').lower() for m in movies_in_library}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('title', '').lower() not in library_titles
+            and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
+            and rec.get('relevance_score', 0) >= 6
+        ]
+
+        # TMDB enrichment
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                search_url = "https://api.themoviedb.org/3/search/movie"
+                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
+                if rec.get('year'):
+                    params["year"] = rec['year']
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200 and response.json().get("results"):
+                    movie = response.json()["results"][0]
+                    rec['tmdb_id'] = movie.get('id')
+                    rec['poster_path'] = movie.get('poster_path', '')
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                enriched_recs.append(rec)
+            except Exception:
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        # Update history
+        new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
+        updated_history = new_history_items + history
+        eight_weeks_ago = datetime.now() - timedelta(weeks=8)
+        updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        next_gen = datetime.now() + timedelta(days=7)
+
+        supabase.table('magic_movies_cast_crew_cache').upsert({
+            'device_id': device_id,
+            'section_title': section_title,
+            'featured_people': featured_people,
+            'recommendations': enriched_recs,
+            'history': updated_history,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+
+        print(f"\n✅ MAGIC MOVIES CAST & CREW GENERATED: \"{section_title}\" ({duration_ms}ms)")
+
+        return {
+            "status": "success",
+            "section_title": section_title,
+            "featured_people": featured_people,
+            "recommendations_count": len(enriched_recs),
+            "generation_duration_ms": duration_ms
+        }
+
+    except Exception as e:
+        print(f"❌ ERROR generating magic movies cast & crew: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            supabase.table('magic_movies_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+        except:
+            pass
+        return {"error": str(e)}
+
+
+def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered DYNAMIC themed TV show recommendations with 8-week history tracking."""
+
+    print(f"\n📺✨ MAGIC SHOWS GENERATION STARTED for device {device_id[:8]}...")
+    start_time = time.time()
+
+    try:
+        existing = supabase.table('magic_shows_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+
+        if existing.data:
+            cache = existing.data[0]
+            if cache.get('is_generating'):
+                return {"error": "Generation already in progress. Please wait."}
+
+            if cache.get('generated_at'):
+                last_gen = datetime.fromisoformat(cache['generated_at'])
+                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+                if age_days < 7:
+                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+
+        supabase.table('magic_shows_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+
+        library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            supabase.table('magic_shows_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            return {"error": "Library not synced."}
+
+        shows_in_library = library_result.data[0].get('shows', [])
+
+        history = existing.data[0].get('history', []) if existing.data else []
+        excluded_titles = [item['title'] for item in history if 'title' in item]
+
+        # Build context
+        library_genres = {}
+        for show in shows_in_library[:150]:
+            for genre in show.get('genres', []):
+                library_genres[genre] = library_genres.get(genre, 0) + 1
+
+        top_genres = sorted(library_genres.items(), key=lambda x: x[1], reverse=True)[:8]
+
+        context = f"""LIBRARY ANALYSIS:
+- Total Shows: {len(shows_in_library)}
+- Top Genres: {', '.join([f"{g[0]} ({g[1]})" for g in top_genres])}
+
+EXCLUDED TITLES (last 8 weeks):
+{', '.join(excluded_titles[:20]) if excluded_titles else 'None'}
+
+Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list."""
+
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+
+        response = openai_client.responses.create(
+            model=model,
+            instructions=MAGIC_SHOWS_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "magic_shows",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "section_theme": {"type": "string"},
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "genres": {"type": "array", "items": {"type": "string"}},
+                                        "reason": {"type": "string"},
+                                        "relevance_score": {"type": "integer"},
+                                        "seasons": {"type": "integer"}
+                                    },
+                                    "required": ["title", "year", "genres", "reason", "relevance_score", "seasons"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["section_title", "section_theme", "recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+
+        result_data = None
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_data = json.loads(content_item.text)
+                        break
+                break
+
+        if not result_data:
+            raise ValueError("No data in OpenAI response")
+
+        section_title = result_data.get('section_title', 'Magic Shows')
+        section_theme = result_data.get('section_theme', '')
+        recommendations = result_data.get('recommendations', [])
+
+        library_titles = {s.get('title', '').lower() for s in shows_in_library}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('title', '').lower() not in library_titles
+            and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
+            and rec.get('relevance_score', 0) >= 6
+        ]
+
+        # TMDB enrichment
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                search_url = "https://api.themoviedb.org/3/search/tv"
+                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
+                if rec.get('year'):
+                    params["first_air_date_year"] = rec['year']
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200 and response.json().get("results"):
+                    show = response.json()["results"][0]
+                    rec['tmdb_id'] = show.get('id')
+                    rec['poster_path'] = show.get('poster_path', '')
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                enriched_recs.append(rec)
+            except Exception:
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        # Update history
+        new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
+        updated_history = new_history_items + history
+        eight_weeks_ago = datetime.now() - timedelta(weeks=8)
+        updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        next_gen = datetime.now() + timedelta(days=7)
+
+        supabase.table('magic_shows_cache').upsert({
+            'device_id': device_id,
+            'section_title': section_title,
+            'section_theme': section_theme,
+            'recommendations': enriched_recs,
+            'history': updated_history,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+
+        print(f"\n✅ MAGIC SHOWS GENERATED: \"{section_title}\" ({duration_ms}ms)")
+
+        return {
+            "status": "success",
+            "section_title": section_title,
+            "recommendations_count": len(enriched_recs),
+            "generation_duration_ms": duration_ms
+        }
+
+    except Exception as e:
+        print(f"❌ ERROR generating magic shows: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            supabase.table('magic_shows_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+        except:
+            pass
+        return {"error": str(e)}
+
+
+def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered PEOPLE-BASED TV show recommendations with 8-week history tracking."""
+
+    print(f"\n📺👥 MAGIC SHOWS CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
+    start_time = time.time()
+
+    try:
+        existing = supabase.table('magic_shows_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+
+        if existing.data:
+            cache = existing.data[0]
+            if cache.get('is_generating'):
+                return {"error": "Generation already in progress. Please wait."}
+
+            if cache.get('generated_at'):
+                last_gen = datetime.fromisoformat(cache['generated_at'])
+                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+                if age_days < 7:
+                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+
+        supabase.table('magic_shows_cast_crew_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+
+        library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
+        people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            supabase.table('magic_shows_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            return {"error": "Library not synced."}
+
+        shows_in_library = library_result.data[0].get('shows', [])
+        people = people_result.data[0].get('people', []) if people_result.data else []
+
+        history = existing.data[0].get('history', []) if existing.data else []
+        excluded_titles = [item['title'] for item in history if 'title' in item]
+
+        people_sample = people[:30] if people else []
+        people_str = '\n'.join([f"- {p.get('name', 'Unknown')} ({p.get('role', 'Unknown')})" for p in people_sample])
+
+        context = f"""LIBRARY ANALYSIS:
+- Total Shows: {len(shows_in_library)}
+
+PEOPLE IN LIBRARY (sample):
+{people_str if people_str else 'No people data available'}
+
+EXCLUDED TITLES (last 8 weeks):
+{', '.join(excluded_titles[:20]) if excluded_titles else 'None'}
+
+Pick 1-3 key people and create a themed section around their TV work."""
+
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+
+        response = openai_client.responses.create(
+            model=model,
+            instructions=MAGIC_SHOWS_CAST_CREW_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "magic_shows_cast_crew",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "featured_people": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "role": {"type": "string"},
+                                        "tmdb_id": {"type": "integer"}
+                                    },
+                                    "required": ["name", "role", "tmdb_id"],
+                                    "additionalProperties": False
+                                }
+                            },
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "genres": {"type": "array", "items": {"type": "string"}},
+                                        "reason": {"type": "string"},
+                                        "relevance_score": {"type": "integer"},
+                                        "seasons": {"type": "integer"},
+                                        "featured_person": {"type": "string"}
+                                    },
+                                    "required": ["title", "year", "genres", "reason", "relevance_score", "seasons", "featured_person"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["section_title", "featured_people", "recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+
+        result_data = None
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_data = json.loads(content_item.text)
+                        break
+                break
+
+        if not result_data:
+            raise ValueError("No data in OpenAI response")
+
+        section_title = result_data.get('section_title', 'Magic Shows Cast & Crew')
+        featured_people = result_data.get('featured_people', [])
+        recommendations = result_data.get('recommendations', [])
+
+        library_titles = {s.get('title', '').lower() for s in shows_in_library}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('title', '').lower() not in library_titles
+            and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
+            and rec.get('relevance_score', 0) >= 6
+        ]
+
+        # TMDB enrichment
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                search_url = "https://api.themoviedb.org/3/search/tv"
+                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
+                if rec.get('year'):
+                    params["first_air_date_year"] = rec['year']
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200 and response.json().get("results"):
+                    show = response.json()["results"][0]
+                    rec['tmdb_id'] = show.get('id')
+                    rec['poster_path'] = show.get('poster_path', '')
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                enriched_recs.append(rec)
+            except Exception:
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        # Update history
+        new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
+        updated_history = new_history_items + history
+        eight_weeks_ago = datetime.now() - timedelta(weeks=8)
+        updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        next_gen = datetime.now() + timedelta(days=7)
+
+        supabase.table('magic_shows_cast_crew_cache').upsert({
+            'device_id': device_id,
+            'section_title': section_title,
+            'featured_people': featured_people,
+            'recommendations': enriched_recs,
+            'history': updated_history,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+
+        print(f"\n✅ MAGIC SHOWS CAST & CREW GENERATED: \"{section_title}\" ({duration_ms}ms)")
+
+        return {
+            "status": "success",
+            "section_title": section_title,
+            "featured_people": featured_people,
+            "recommendations_count": len(enriched_recs),
+            "generation_duration_ms": duration_ms
+        }
+
+    except Exception as e:
+        print(f"❌ ERROR generating magic shows cast & crew: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            supabase.table('magic_shows_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+        except:
+            pass
+        return {"error": str(e)}
+
+
 # Function for Responses API
 def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
     """Request episode details for a show from device - ZERO-KNOWLEDGE on-demand fetch!"""
@@ -3243,6 +4261,266 @@ async def get_up_next(
     except Exception as e:
         print(f"❌ Get up next error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve show recommendations")
+
+# ============================================================================
+# MAGIC RECOMMENDATIONS ENDPOINTS - Dynamic themed sections
+# ============================================================================
+
+@app.post("/recommendations/magic-movies/generate")
+async def generate_magic_movies_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered DYNAMIC themed movie recommendations for Mega/Ultra users."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        result = generate_magic_movies(device_id, subscription_tier)
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Magic Movies endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Magic movies generation failed")
+
+@app.get("/recommendations/magic-movies")
+async def get_magic_movies(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached magic movies recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('magic_movies_cache').select('*').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {
+                "section_title": None,
+                "section_theme": None,
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        return {
+            "section_title": cache.get('section_title'),
+            "section_theme": cache.get('section_theme'),
+            "recommendations": cache.get('recommendations', []),
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get magic movies error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve magic movies")
+
+@app.post("/recommendations/magic-movies-cast-crew/generate")
+async def generate_magic_movies_cast_crew_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered PEOPLE-BASED movie recommendations for Mega/Ultra users."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        result = generate_magic_movies_cast_crew(device_id, subscription_tier)
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Magic Movies Cast & Crew endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Magic movies cast & crew generation failed")
+
+@app.get("/recommendations/magic-movies-cast-crew")
+async def get_magic_movies_cast_crew(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached magic movies cast & crew recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('magic_movies_cast_crew_cache').select('*').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {
+                "section_title": None,
+                "featured_people": [],
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        return {
+            "section_title": cache.get('section_title'),
+            "featured_people": cache.get('featured_people', []),
+            "recommendations": cache.get('recommendations', []),
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get magic movies cast & crew error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve magic movies cast & crew")
+
+@app.post("/recommendations/magic-shows/generate")
+async def generate_magic_shows_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered DYNAMIC themed show recommendations for Mega/Ultra users."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        result = generate_magic_shows(device_id, subscription_tier)
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Magic Shows endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Magic shows generation failed")
+
+@app.get("/recommendations/magic-shows")
+async def get_magic_shows(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached magic shows recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('magic_shows_cache').select('*').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {
+                "section_title": None,
+                "section_theme": None,
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        return {
+            "section_title": cache.get('section_title'),
+            "section_theme": cache.get('section_theme'),
+            "recommendations": cache.get('recommendations', []),
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get magic shows error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve magic shows")
+
+@app.post("/recommendations/magic-shows-cast-crew/generate")
+async def generate_magic_shows_cast_crew_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered PEOPLE-BASED show recommendations for Mega/Ultra users."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        result = generate_magic_shows_cast_crew(device_id, subscription_tier)
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Magic Shows Cast & Crew endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Magic shows cast & crew generation failed")
+
+@app.get("/recommendations/magic-shows-cast-crew")
+async def get_magic_shows_cast_crew(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached magic shows cast & crew recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('magic_shows_cast_crew_cache').select('*').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {
+                "section_title": None,
+                "featured_people": [],
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        return {
+            "section_title": cache.get('section_title'),
+            "featured_people": cache.get('featured_people', []),
+            "recommendations": cache.get('recommendations', []),
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get magic shows cast & crew error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve magic shows cast & crew")
 
 @app.get("/")
 async def root():

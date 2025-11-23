@@ -1258,6 +1258,315 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         return {"error": str(e)}
 
 
+UP_NEXT_PROMPT = """You are a TV series curator specializing in personalized recommendations.
+
+Your task: Analyze the user's viewing history and library to recommend 10-15 TV shows they should watch next.
+
+FOCUS ON:
+- Popular, trending, and critically acclaimed series
+- Shows that match their viewing patterns and genre preferences
+- Recently released or currently airing series (last 3-5 years)
+- Binge-worthy shows with strong ratings
+- Series that complement what they've already watched
+
+AVOID:
+- Shows already in their library
+- Cancelled shows with unresolved endings (unless critically acclaimed)
+- Very niche or obscure content
+- Shows with poor critical reception
+
+OUTPUT FORMAT (JSON):
+{
+  "recommendations": [
+    {
+      "title": "Series Title",
+      "year": 2020,
+      "genres": ["Drama", "Thriller"],
+      "reason": "One sentence explaining why this matches their taste",
+      "popularity_score": 8,
+      "seasons": 3
+    }
+  ]
+}
+
+The popularity_score (1-10) indicates relevance and quality:
+- 9-10 = Extremely popular/critically acclaimed, perfect match
+- 6-8 = Well-regarded, good match for their taste
+- 1-5 = Less relevant (avoid these)
+
+Base your recommendations on their watch history patterns, favorite genres, and viewing habits."""
+
+def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered TV show recommendations for Mega/Ultra users.
+
+    This is a separate AI function (not part of the chat system) that runs weekly.
+    Analyzes library + watch history to find personalized show recommendations.
+
+    Args:
+        device_id: Device identifier
+        subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5)
+    """
+
+    print(f"\n📺 UP NEXT GENERATION STARTED for device {device_id[:8]}...")
+    print(f"  → Subscription tier: {subscription_tier.upper()}")
+    start_time = time.time()
+
+    try:
+        # Check if generation is already in progress
+        existing = supabase.table('show_recommendations_cache').select('is_generating, next_generation_at, generated_at').eq('device_id', device_id).execute()
+
+        if existing.data:
+            cache = existing.data[0]
+
+            # Don't regenerate if already running
+            if cache.get('is_generating'):
+                print("  ⏭️  Generation already in progress")
+                return {"error": "Generation already in progress. Please wait."}
+
+            # Check if we need to regenerate (> 7 days old)
+            if cache.get('generated_at'):
+                last_gen = datetime.fromisoformat(cache['generated_at'])
+                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+
+                if age_days < 7:
+                    print(f"  ℹ️  Show recommendations generated {age_days:.1f} days ago - no regeneration needed")
+                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+
+        # Mark as generating
+        supabase.table('show_recommendations_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+
+        print("  → Fetching library cache...")
+        library_result = supabase.table('library_cache').select('movies, shows').eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            print("  ❌ No library cache found")
+            supabase.table('show_recommendations_cache').upsert({
+                'device_id': device_id,
+                'is_generating': False
+            }, on_conflict='device_id').execute()
+            return {"error": "Library not synced. Please sync your library first."}
+
+        library = library_result.data[0]
+        shows_in_library = library.get('shows', [])
+        print(f"  ✓ Found {len(shows_in_library)} shows in library")
+
+        # Get watch history
+        print("  → Fetching watch history...")
+        watch_result = supabase.table('watch_history_cache').select('viewing_stats, top_content, history').eq('device_id', device_id).execute()
+
+        watch_data = {}
+        if watch_result.data:
+            watch_data = watch_result.data[0]
+            print(f"  ✓ Found watch history ({watch_data.get('viewing_stats', {}).get('total_plays', 0)} plays)")
+        else:
+            print("  ℹ️  No watch history found - will recommend based on library only")
+
+        # Build context for AI
+        library_genres = {}
+        for show in shows_in_library[:100]:  # Sample to avoid token limits
+            for genre in show.get('genres', []):
+                library_genres[genre] = library_genres.get(genre, 0) + 1
+
+        top_library_genres = sorted(library_genres.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        viewing_stats = watch_data.get('viewing_stats', {})
+        top_watched = watch_data.get('top_content', [])[:10]
+
+        # Filter top watched to only include shows
+        top_watched_shows = [t for t in top_watched if t.get('type') == 'show'][:5]
+
+        # Build AI context
+        context = f"""LIBRARY ANALYSIS:
+- Total Shows: {len(shows_in_library)}
+- Top Genres: {', '.join([f"{g[0]} ({g[1]})" for g in top_library_genres])}
+
+WATCH HISTORY:
+- Total Plays: {viewing_stats.get('total_plays', 0)}
+- Top Years: {', '.join(map(str, viewing_stats.get('top_years', [])[:5]))}
+
+MOST WATCHED SHOWS:
+{chr(10).join([f"- {t.get('title')} ({t.get('year')}) - {t.get('play_count')} plays" for t in top_watched_shows]) if top_watched_shows else '- No show watch history available'}
+
+Based on this profile, recommend 10-15 TV shows they should watch next."""
+
+        print("  → Calling OpenAI for show recommendations...")
+        print(f"  → Context length: {len(context)} chars")
+
+        # Select model based on subscription tier
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        print(f"  → Using model: {model}")
+
+        # Call OpenAI with Responses API
+        response = openai_client.responses.create(
+            model=model,
+            instructions=UP_NEXT_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "show_recommendations",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "genres": {
+                                            "type": "array",
+                                            "items": {"type": "string"}
+                                        },
+                                        "reason": {"type": "string"},
+                                        "popularity_score": {"type": "integer"},
+                                        "seasons": {"type": "integer"}
+                                    },
+                                    "required": ["title", "year", "genres", "reason", "popularity_score", "seasons"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+
+        # Extract structured JSON from Responses API output
+        print(f"  → Response output items: {len(response.output)}")
+
+        recommendations = []
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result_text = content_item.text
+                        print(f"  ✓ Got AI response ({len(result_text)} chars)")
+                        try:
+                            recommendations_data = json.loads(result_text)
+                            recommendations = recommendations_data.get('recommendations', [])
+                            print(f"  ✓ Parsed {len(recommendations)} recommendations")
+                            break
+                        except json.JSONDecodeError as e:
+                            print(f"  ❌ Failed to parse JSON: {e}")
+                            print(f"  Raw response text: {result_text}")
+                            raise
+                break
+
+        if not recommendations:
+            print(f"  ❌ No recommendations found in response")
+            print(f"  Full response dump:")
+            print(response.model_dump_json(indent=2))
+            raise ValueError("No recommendations found in OpenAI response")
+
+        # Filter out shows already in library and low popularity scores
+        library_titles = {s.get('title', '').lower() for s in shows_in_library}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('title', '').lower() not in library_titles
+            and rec.get('popularity_score', 0) >= 6  # Only keep relevant recommendations
+        ]
+
+        print(f"  ✓ Filtered to {len(filtered_recs)} unique show recommendations")
+
+        # Enrich with TMDB data (poster_path, tmdb_id)
+        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data...")
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                title = rec.get('title', '')
+                year = rec.get('year')
+
+                # Search TMDB for this TV show
+                search_url = "https://api.themoviedb.org/3/search/tv"
+                params = {
+                    "api_key": TMDB_API_KEY,
+                    "query": title,
+                    "include_adult": False
+                }
+                if year:
+                    params["first_air_date_year"] = year
+
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200:
+                    results = response.json().get("results", [])
+                    if results:
+                        # Take the first result (most relevant)
+                        show = results[0]
+                        rec['tmdb_id'] = show.get('id')
+                        rec['poster_path'] = show.get('poster_path', '')
+                        print(f"    ✓ {title} ({year}): poster={rec['poster_path']}")
+                    else:
+                        rec['tmdb_id'] = None
+                        rec['poster_path'] = ''
+                        print(f"    ⚠ {title} ({year}): No TMDB match")
+                else:
+                    rec['tmdb_id'] = None
+                    rec['poster_path'] = ''
+                    print(f"    ❌ {title} ({year}): TMDB API error {response.status_code}")
+
+                enriched_recs.append(rec)
+            except Exception as e:
+                print(f"    ❌ Error enriching {rec.get('title')}: {e}")
+                # Add without TMDB data
+                rec['tmdb_id'] = None
+                rec['poster_path'] = ''
+                enriched_recs.append(rec)
+
+        print(f"  ✓ Enriched {len(enriched_recs)} recommendations with TMDB data")
+
+        # Calculate generation duration
+        duration_ms = int((time.time() - start_time) * 1000)
+
+        # Store in database
+        next_gen = datetime.now() + timedelta(days=7)
+        supabase.table('show_recommendations_cache').upsert({
+            'device_id': device_id,
+            'recommendations': enriched_recs,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+
+        print(f"\n✅ SHOW RECOMMENDATIONS GENERATED ({duration_ms}ms)")
+        print(f"  → {len(filtered_recs)} recommendations stored")
+        print(f"  → Next generation: {next_gen.strftime('%Y-%m-%d')}\n")
+
+        return {
+            "status": "success",
+            "recommendations_count": len(filtered_recs),
+            "generation_duration_ms": duration_ms,
+            "next_generation_at": next_gen.isoformat()
+        }
+
+    except Exception as e:
+        print(f"❌ ERROR generating show recommendations: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Clear is_generating flag on error
+        try:
+            supabase.table('show_recommendations_cache').upsert({
+                'device_id': device_id,
+                'is_generating': False
+            }, on_conflict='device_id').execute()
+        except:
+            pass
+
+        return {"error": str(e)}
+
+
 # Function for Responses API
 def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
     """Request episode details for a show from device - ZERO-KNOWLEDGE on-demand fetch!"""
@@ -2866,6 +3175,74 @@ async def get_deep_cuts(
     except Exception as e:
         print(f"❌ Get deep cuts error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve deep cuts")
+
+@app.post("/recommendations/up-next/generate")
+async def generate_up_next_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered show recommendations for Mega/Ultra users.
+
+    This endpoint triggers weekly show recommendation generation based on library + watch history.
+    Mega users get gpt-5-mini, Ultra users get gpt-5."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        print(f"📺 Up Next generation requested for device {device_id[:8]}...")
+        print(f"  → Tier: {subscription_tier.upper()}")
+
+        # Generate show recommendations (function handles rate limiting internally)
+        result = generate_up_next(device_id, subscription_tier)
+
+        if "error" in result:
+            # Return appropriate status code based on error
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Up Next endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Show recommendations generation failed")
+
+@app.get("/recommendations/up-next")
+async def get_up_next(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached show recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('show_recommendations_cache').select('*').eq('device_id', device_id).execute()
+
+        if not result.data:
+            return {
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        return {
+            "recommendations": cache.get('recommendations', []),
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get up next error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve show recommendations")
 
 @app.get("/")
 async def root():

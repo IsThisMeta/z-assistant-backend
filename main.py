@@ -18,6 +18,7 @@ from upstash_redis import Redis
 import hashlib
 import hmac
 import base64
+import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -1186,7 +1187,8 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
                 if year:
                     params["year"] = year
 
-                response = httpx.get(search_url, params=params, timeout=5.0)
+                async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
                 if response.status_code == 200:
                     results = response.json().get("results", [])
                     if results:
@@ -1495,7 +1497,8 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
                 if year:
                     params["first_air_date_year"] = year
 
-                response = httpx.get(search_url, params=params, timeout=5.0)
+                async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
                 if response.status_code == 200:
                     results = response.json().get("results", [])
                     if results:
@@ -1569,6 +1572,38 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
 # ============================================================================
 # MAGIC RECOMMENDATIONS - Dynamic themed sections with AI-generated titles
 # ============================================================================
+
+
+async def fetch_tmdb_data(client: httpx.AsyncClient, rec: Dict[str, Any], media_type: str) -> Dict[str, Any]:
+    try:
+        search_url = f"https://api.themoviedb.org/3/search/{media_type}"
+        params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
+        if rec.get('year'):
+            if media_type == "movie":
+                params["year"] = rec['year']
+            else:
+                params["first_air_date_year"] = rec['year']
+        
+        response = await client.get(search_url, params=params, timeout=5.0)
+        if response.status_code == 200 and response.json().get("results"):
+            item = response.json()["results"][0]
+            rec['tmdb_id'] = item.get('id')
+            rec['poster_path'] = item.get('poster_path', '')
+        else:
+            rec['tmdb_id'] = None
+            rec['poster_path'] = ''
+    except Exception:
+        rec['tmdb_id'] = None
+        rec['poster_path'] = ''
+    return rec
+
+async def enrich_recommendations_with_tmdb(recommendations: List[Dict[str, Any]], media_type: str = "movie") -> List[Dict[str, Any]]:
+    """Enrich recommendations with TMDB data concurrently."""
+    async with httpx.AsyncClient() as client:
+        tasks = []
+        for rec in recommendations:
+            tasks.append(fetch_tmdb_data(client, rec, media_type))
+        return await asyncio.gather(*tasks)
 
 MAGIC_MOVIES_PROMPT = """You are a creative film curator who creates DYNAMICALLY THEMED movie recommendation sections.
 
@@ -1785,7 +1820,7 @@ OUTPUT FORMAT (JSON):
 BE CREATIVE. Focus on 1-3 people max. Make it feel like exploring their TV career!"""
 
 
-def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬✨ MAGIC MOVIES GENERATION STARTED for device {device_id[:8]}...")
@@ -1920,8 +1955,8 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Movies')
-        section_theme = result_data.get('section_theme', '')
+        section_title = result_data.get('section_title') or 'Magic Movies'
+        section_theme = result_data.get('section_theme') or ''
         recommendations = result_data.get('recommendations', [])
 
         # Filter and enrich
@@ -1933,28 +1968,8 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
             and rec.get('relevance_score', 0) >= 6
         ]
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/movie"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    movie = response.json()["results"][0]
-                    rec['tmdb_id'] = movie.get('id')
-                    rec['poster_path'] = movie.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment (Async)
+        enriched_recs = await enrich_recommendations_with_tmdb(filtered_recs, media_type="movie")
 
         # Update history (keep last 8 weeks)
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2004,7 +2019,7 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         return {"error": str(e)}
 
 
-def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬👥 MAGIC MOVIES CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
@@ -2125,7 +2140,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Cast & Crew')
+        section_title = result_data.get('section_title') or 'Magic Cast & Crew'
         featured_people = result_data.get('featured_people', [])
         recommendations = result_data.get('recommendations', [])
 
@@ -2137,28 +2152,8 @@ Pick 1-3 key people and create a themed section around their filmography."""
             and rec.get('relevance_score', 0) >= 6
         ]
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/movie"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    movie = response.json()["results"][0]
-                    rec['tmdb_id'] = movie.get('id')
-                    rec['poster_path'] = movie.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment (Async)
+        enriched_recs = await enrich_recommendations_with_tmdb(filtered_recs, media_type="movie")
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2203,7 +2198,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
         return {"error": str(e)}
 
 
-def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺✨ MAGIC SHOWS GENERATION STARTED for device {device_id[:8]}...")
@@ -2310,8 +2305,8 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Shows')
-        section_theme = result_data.get('section_theme', '')
+        section_title = result_data.get('section_title') or 'Magic Shows'
+        section_theme = result_data.get('section_theme') or ''
         recommendations = result_data.get('recommendations', [])
 
         library_titles = {s.get('title', '').lower() for s in shows_in_library}
@@ -2322,28 +2317,8 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
             and rec.get('relevance_score', 0) >= 6
         ]
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/tv"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["first_air_date_year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    show = response.json()["results"][0]
-                    rec['tmdb_id'] = show.get('id')
-                    rec['poster_path'] = show.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment (Async)
+        enriched_recs = await enrich_recommendations_with_tmdb(filtered_recs, media_type="tv")
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2387,7 +2362,7 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         return {"error": str(e)}
 
 
-def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺👥 MAGIC SHOWS CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
@@ -2506,7 +2481,7 @@ Pick 1-3 key people and create a themed section around their TV work."""
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Shows Cast & Crew')
+        section_title = result_data.get('section_title') or 'Magic Shows Cast & Crew'
         featured_people = result_data.get('featured_people', [])
         recommendations = result_data.get('recommendations', [])
 
@@ -2518,28 +2493,8 @@ Pick 1-3 key people and create a themed section around their TV work."""
             and rec.get('relevance_score', 0) >= 6
         ]
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/tv"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["first_air_date_year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    show = response.json()["results"][0]
-                    rec['tmdb_id'] = show.get('id')
-                    rec['poster_path'] = show.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment (Async)
+        enriched_recs = await enrich_recommendations_with_tmdb(filtered_recs, media_type="tv")
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2817,7 +2772,7 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 # Function for Responses API
-def search_movies(query: str) -> Dict[str, Any]:
+async def search_movies(query: str) -> Dict[str, Any]:
     """Search for movies on TMDB with light normalization and year hinting."""
     print(f"🔧 TOOL CALLED: search_movies - Query: {query}")
 
@@ -2858,12 +2813,13 @@ def search_movies(query: str) -> Dict[str, Any]:
             print("  → using cached TMDB search")
             return cached
 
-        def _tmdb_search(q: str, year: Optional[int]) -> Dict[str, Any]:
+        async def _tmdb_search(q: str, year: Optional[int]) -> Dict[str, Any]:
             params = {"api_key": TMDB_API_KEY, "query": q, "include_adult": False}
             if year is not None:
                 params["year"] = year
 
-            resp = httpx.get(base_url, params=params, timeout=5.0)
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(base_url, params=params, timeout=5.0)
             if resp.status_code != 200:
                 return {"movies": [], "error": f"API error: {resp.status_code}"}
 
@@ -2896,11 +2852,11 @@ def search_movies(query: str) -> Dict[str, Any]:
             return {"movies": movies, "total_found": len(results)}
 
         # First attempt: normalized title + year (if found)
-        result = _tmdb_search(title, year_hint)
+        result = await _tmdb_search(title, year_hint)
 
         # Fallback: if no hits and we had a year, try without year
         if result.get("total_found", 0) == 0 and year_hint is not None:
-            result = _tmdb_search(title, None)
+            result = await _tmdb_search(title, None)
 
         # Cache and return
         search_movies._cache[cache_key] = result
@@ -2911,7 +2867,7 @@ def search_movies(query: str) -> Dict[str, Any]:
         return {"movies": [], "error": str(e)}
 
 # Function for Responses API
-def search_shows(query: str) -> Dict[str, Any]:
+async def search_shows(query: str) -> Dict[str, Any]:
     """Search for TV shows on TMDB and return a list of results"""
     print(f"🔧 TOOL CALLED: search_shows - Query: {query}")
     
@@ -2922,7 +2878,8 @@ def search_shows(query: str) -> Dict[str, Any]:
             "query": query
         }
         
-        response = httpx.get(search_url, params=params, timeout=5.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
         if response.status_code == 200:
             results = response.json().get("results", [])
             
@@ -2952,7 +2909,7 @@ def search_shows(query: str) -> Dict[str, Any]:
         return {"shows": [], "error": str(e)}
 
 # Function for Responses API
-def search_person(query: str) -> Dict[str, Any]:
+async def search_person(query: str) -> Dict[str, Any]:
     """Search for people (actors, directors, etc.) on TMDB with gigachad relevance ranking"""
     print(f"🔧 TOOL CALLED: search_person - Query: {query}")
 
@@ -2964,7 +2921,8 @@ def search_person(query: str) -> Dict[str, Any]:
             "include_adult": False
         }
 
-        response = httpx.get(search_url, params=params, timeout=5.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
         if response.status_code == 200:
             results = response.json().get("results", [])
 
@@ -2997,7 +2955,7 @@ def search_person(query: str) -> Dict[str, Any]:
         return {"people": [], "error": str(e)}
 
 # Function for Responses API
-def get_person_credits(person_id: int) -> Dict[str, Any]:
+async def get_person_credits(person_id: int) -> Dict[str, Any]:
     """Get all movie and TV credits for a person"""
     print(f"🔧 TOOL CALLED: get_person_credits - Person ID: {person_id}")
 
@@ -3007,7 +2965,8 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
             "api_key": TMDB_API_KEY
         }
 
-        response = httpx.get(credits_url, params=params, timeout=5.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(credits_url, params=params, timeout=5.0)
         if response.status_code == 200:
             data = response.json()
 
@@ -3755,18 +3714,18 @@ def get_unified_tools():
 
 
 # Function dispatcher
-def execute_function(function_name: str, arguments: dict, device_id: str) -> dict:
+async def execute_function(function_name: str, arguments: dict, device_id: str) -> dict:
     """Execute a function call and return the result - ZERO-KNOWLEDGE!"""
     try:
         # Discover tools
         if function_name == "search_movies":
-            return search_movies(arguments["query"])
+            return await search_movies(arguments["query"])
         elif function_name == "search_shows":
-            return search_shows(arguments["query"])
+            return await search_shows(arguments["query"])
         elif function_name == "search_person":
-            return search_person(arguments["query"])
+            return await search_person(arguments["query"])
         elif function_name == "get_person_credits":
-            return get_person_credits(arguments["person_id"])
+            return await get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
             return add_to_stage(
                 arguments["operation"],
@@ -4096,21 +4055,43 @@ async def chat(
             )
 
             has_function_calls = False
+            tool_calls = []
+            
+            # 1. Collect all function calls
             for item in response.output:
                 if item.type == "function_call":
                     has_function_calls = True
+                    tool_calls.append(item)
+
+            if has_function_calls:
+                # 2. Execute concurrently
+                async def run_tool(item):
                     function_name = item.name
                     arguments = json.loads(item.arguments)
                     call_id = item.call_id
-
                     print(f"  🔧 {function_name}({arguments})")
+                    
+                    result = await execute_function(function_name, arguments, device_id)
+                    
+                    return {
+                        "item": item,
+                        "result": result,
+                        "call_id": call_id,
+                        "function_name": function_name,
+                        "arguments": item.arguments
+                    }
 
-                    result = execute_function(function_name, arguments, device_id)
-
-                    # Check if result contains a stage_id (from add_instantly or add_to_stage)
+                results = await asyncio.gather(*[run_tool(item) for item in tool_calls])
+                
+                # 3. Process results in order
+                for res in results:
+                    result = res["result"]
+                    call_id = res["call_id"]
+                    function_name = res["function_name"]
+                    
+                    # Check if result contains a stage_id
                     if isinstance(result, dict) and result.get('stage_id'):
                         stage_id = result.get('stage_id')
-                        # Track operation type to determine response format
                         if result.get('operation'):
                             operation_type = result.get('operation')
                         print(f"  → Got stage_id: {stage_id}, operation: {operation_type}")
@@ -4127,7 +4108,7 @@ async def chat(
                         "type": "function_call",
                         "call_id": call_id,
                         "name": function_name,
-                        "arguments": item.arguments
+                        "arguments": res["arguments"]
                     })
 
                     input_messages.append({
@@ -4340,7 +4321,7 @@ async def generate_magic_movies_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_movies(device_id, subscription_tier)
+        result = await generate_magic_movies(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -4404,7 +4385,7 @@ async def generate_magic_movies_cast_crew_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_movies_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_movies_cast_crew(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -4468,7 +4449,7 @@ async def generate_magic_shows_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_shows(device_id, subscription_tier)
+        result = await generate_magic_shows(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -4532,7 +4513,7 @@ async def generate_magic_shows_cast_crew_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_shows_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_shows_cast_crew(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():

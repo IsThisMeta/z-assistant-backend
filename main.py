@@ -984,7 +984,7 @@ The obscurity_score (1-10) indicates how "deep cut" it is:
 
 Base your recommendations on their watch history patterns and library genres."""
 
-def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered hidden gem movie recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
@@ -1188,7 +1188,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
                     params["year"] = year
 
                 async with httpx.AsyncClient() as client:
-            response = await client.get(search_url, params=params, timeout=5.0)
+                    response = await client.get(search_url, params=params, timeout=5.0)
                 if response.status_code == 200:
                     results = response.json().get("results", [])
                     if results:
@@ -1297,7 +1297,7 @@ The popularity_score (1-10) indicates relevance and quality:
 
 Base your recommendations on their watch history patterns, favorite genres, and viewing habits."""
 
-def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered TV show recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
@@ -1498,7 +1498,7 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
                     params["first_air_date_year"] = year
 
                 async with httpx.AsyncClient() as client:
-            response = await client.get(search_url, params=params, timeout=5.0)
+                    response = await client.get(search_url, params=params, timeout=5.0)
                 if response.status_code == 200:
                     results = response.json().get("results", [])
                     if results:
@@ -1851,7 +1851,8 @@ async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra"
         supabase.table('magic_movies_cache').upsert({
             'device_id': device_id,
             'is_generating': True,
-            'generation_started_at': datetime.now().isoformat()
+            'generation_started_at': datetime.now().isoformat(),
+            'section_title': 'Magic Movies'  # Placeholder for NOT NULL constraint
         }, on_conflict='device_id').execute()
 
         # Fetch library
@@ -2042,7 +2043,8 @@ async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str
         supabase.table('magic_movies_cast_crew_cache').upsert({
             'device_id': device_id,
             'is_generating': True,
-            'generation_started_at': datetime.now().isoformat()
+            'generation_started_at': datetime.now().isoformat(),
+            'section_title': 'Magic Cast & Crew'  # Placeholder for NOT NULL constraint
         }, on_conflict='device_id').execute()
 
         # Fetch library and people
@@ -2221,7 +2223,8 @@ async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra")
         supabase.table('magic_shows_cache').upsert({
             'device_id': device_id,
             'is_generating': True,
-            'generation_started_at': datetime.now().isoformat()
+            'generation_started_at': datetime.now().isoformat(),
+            'section_title': 'Magic Shows'  # Placeholder for NOT NULL constraint
         }, on_conflict='device_id').execute()
 
         library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
@@ -2385,7 +2388,8 @@ async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str 
         supabase.table('magic_shows_cast_crew_cache').upsert({
             'device_id': device_id,
             'is_generating': True,
-            'generation_started_at': datetime.now().isoformat()
+            'generation_started_at': datetime.now().isoformat(),
+            'section_title': 'Magic Shows Cast & Crew'  # Placeholder for NOT NULL constraint
         }, on_conflict='device_id').execute()
 
         library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
@@ -4188,7 +4192,7 @@ async def generate_deep_cuts_endpoint(
         print(f"  → Tier: {subscription_tier.upper()}")
 
         # Generate deep cuts (function handles rate limiting internally)
-        result = generate_deep_cuts(device_id, subscription_tier)
+        result = await generate_deep_cuts(device_id, subscription_tier)
 
         if "error" in result:
             # Return appropriate status code based on error
@@ -4256,7 +4260,7 @@ async def generate_up_next_endpoint(
         print(f"  → Tier: {subscription_tier.upper()}")
 
         # Generate show recommendations (function handles rate limiting internally)
-        result = generate_up_next(device_id, subscription_tier)
+        result = await generate_up_next(device_id, subscription_tier)
 
         if "error" in result:
             # Return appropriate status code based on error

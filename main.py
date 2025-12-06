@@ -1934,9 +1934,10 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Movies')
-        section_theme = result_data.get('section_theme', '')
-        recommendations = result_data.get('recommendations', [])
+        section_title = result_data.get('section_title') or 'Magic Movies'
+        section_theme = result_data.get('section_theme') or ''
+        recommendations = result_data.get('recommendations') or []
+        model_recs_count = len(recommendations)
 
         # Filter and enrich
         library_titles = {m.get('title', '').lower() for m in movies_in_library}
@@ -1946,6 +1947,41 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
             and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
             and rec.get('relevance_score', 0) >= 6
         ]
+        filtered_count = len(filtered_recs)
+
+        if filtered_count == 0 and recommendations:
+            print("  ⚠️  No Magic Movies survived filtering; using fallback top 12")
+            fallback_recs = []
+            for rec in recommendations:
+                title = (rec.get('title') or "").strip()
+                if not title:
+                    continue
+                lower = title.lower()
+                if lower in library_titles or lower in [t.lower() for t in excluded_titles]:
+                    continue
+                fallback_recs.append(rec)
+                if len(fallback_recs) >= 12:
+                    break
+            filtered_recs = fallback_recs
+            filtered_count = len(filtered_recs)
+
+        def _clean_movie(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            cleaned['relevance_score'] = int(cleaned.get('relevance_score') or 0)
+            cleaned['match_score'] = cleaned['relevance_score']
+            cleaned['director'] = cleaned.get('director')
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        filtered_recs = [_clean_movie(rec) for rec in filtered_recs if (rec.get('title') or '').strip()]
+        filtered_count = len(filtered_recs)
+
+        print(f"  → Model recs: {model_recs_count}, after filtering: {filtered_count}")
 
         # TMDB enrichment
         enriched_recs = []
@@ -2166,9 +2202,10 @@ Pick 1-3 key people and create a themed section around their filmography."""
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Cast & Crew')
-        featured_people = result_data.get('featured_people', [])
-        recommendations = result_data.get('recommendations', [])
+        section_title = result_data.get('section_title') or 'Magic Cast & Crew'
+        featured_people = result_data.get('featured_people') or []
+        recommendations = result_data.get('recommendations') or []
+        model_recs_count = len(recommendations)
 
         library_titles = {m.get('title', '').lower() for m in movies_in_library}
         filtered_recs = [
@@ -2177,6 +2214,50 @@ Pick 1-3 key people and create a themed section around their filmography."""
             and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
             and rec.get('relevance_score', 0) >= 6
         ]
+        filtered_count = len(filtered_recs)
+
+        if filtered_count == 0 and recommendations:
+            print("  ⚠️  No Magic Cast & Crew movies survived filtering; using fallback top 12")
+            fallback_recs = []
+            for rec in recommendations:
+                title = (rec.get('title') or "").strip()
+                if not title:
+                    continue
+                lower = title.lower()
+                if lower in library_titles or lower in [t.lower() for t in excluded_titles]:
+                    continue
+                fallback_recs.append(rec)
+                if len(fallback_recs) >= 12:
+                    break
+            filtered_recs = fallback_recs
+            filtered_count = len(filtered_recs)
+
+        def _clean_movie(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            cleaned['relevance_score'] = int(cleaned.get('relevance_score') or 0)
+            cleaned['match_score'] = cleaned['relevance_score']
+            cleaned['director'] = cleaned.get('director')
+            cleaned['featured_person'] = cleaned.get('featured_person') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        def _clean_person(p: dict) -> dict:
+            cleaned = dict(p)
+            cleaned['name'] = (cleaned.get('name') or '').strip()
+            cleaned['role'] = cleaned.get('role') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            return cleaned
+
+        filtered_recs = [_clean_movie(rec) for rec in filtered_recs if (rec.get('title') or '').strip()]
+        filtered_count = len(filtered_recs)
+        featured_people = [_clean_person(p) for p in featured_people if (p.get('name') or '').strip()]
+
+        print(f"  → Cast/Crew model recs: {model_recs_count}, after filtering: {filtered_count}")
 
         # TMDB enrichment
         enriched_recs = []
@@ -2371,9 +2452,10 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Shows')
-        section_theme = result_data.get('section_theme', '')
-        recommendations = result_data.get('recommendations', [])
+        section_title = result_data.get('section_title') or 'Magic Shows'
+        section_theme = result_data.get('section_theme') or ''
+        recommendations = result_data.get('recommendations') or []
+        model_recs_count = len(recommendations)
 
         library_titles = {s.get('title', '').lower() for s in shows_in_library}
         filtered_recs = [
@@ -2382,6 +2464,41 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
             and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
             and rec.get('relevance_score', 0) >= 6
         ]
+        filtered_count = len(filtered_recs)
+
+        if filtered_count == 0 and recommendations:
+            print("  ⚠️  No Magic Shows survived filtering; using fallback top 12")
+            fallback_recs = []
+            for rec in recommendations:
+                title = (rec.get('title') or "").strip()
+                if not title:
+                    continue
+                lower = title.lower()
+                if lower in library_titles or lower in [t.lower() for t in excluded_titles]:
+                    continue
+                fallback_recs.append(rec)
+                if len(fallback_recs) >= 12:
+                    break
+            filtered_recs = fallback_recs
+            filtered_count = len(filtered_recs)
+
+        def _clean_show(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            cleaned['relevance_score'] = int(cleaned.get('relevance_score') or 0)
+            cleaned['match_score'] = cleaned['relevance_score']
+            cleaned['seasons'] = int(cleaned.get('seasons') or 0)
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        filtered_recs = [_clean_show(rec) for rec in filtered_recs if (rec.get('title') or '').strip()]
+        filtered_count = len(filtered_recs)
+
+        print(f"  → Model show recs: {model_recs_count}, after filtering: {filtered_count}")
 
         # TMDB enrichment
         enriched_recs = []
@@ -2594,9 +2711,10 @@ Pick 1-3 key people and create a themed section around their TV work."""
         if not result_data:
             raise ValueError("No data in OpenAI response")
 
-        section_title = result_data.get('section_title', 'Magic Shows Cast & Crew')
-        featured_people = result_data.get('featured_people', [])
-        recommendations = result_data.get('recommendations', [])
+        section_title = result_data.get('section_title') or 'Magic Shows Cast & Crew'
+        featured_people = result_data.get('featured_people') or []
+        recommendations = result_data.get('recommendations') or []
+        model_recs_count = len(recommendations)
 
         library_titles = {s.get('title', '').lower() for s in shows_in_library}
         filtered_recs = [
@@ -2605,6 +2723,50 @@ Pick 1-3 key people and create a themed section around their TV work."""
             and rec.get('title', '').lower() not in [t.lower() for t in excluded_titles]
             and rec.get('relevance_score', 0) >= 6
         ]
+        filtered_count = len(filtered_recs)
+
+        if filtered_count == 0 and recommendations:
+            print("  ⚠️  No Magic Shows Cast & Crew survived filtering; using fallback top 12")
+            fallback_recs = []
+            for rec in recommendations:
+                title = (rec.get('title') or "").strip()
+                if not title:
+                    continue
+                lower = title.lower()
+                if lower in library_titles or lower in [t.lower() for t in excluded_titles]:
+                    continue
+                fallback_recs.append(rec)
+                if len(fallback_recs) >= 12:
+                    break
+            filtered_recs = fallback_recs
+            filtered_count = len(filtered_recs)
+
+        def _clean_show(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            cleaned['relevance_score'] = int(cleaned.get('relevance_score') or 0)
+            cleaned['match_score'] = cleaned['relevance_score']
+            cleaned['seasons'] = int(cleaned.get('seasons') or 0)
+            cleaned['featured_person'] = cleaned.get('featured_person') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        def _clean_person(p: dict) -> dict:
+            cleaned = dict(p)
+            cleaned['name'] = (cleaned.get('name') or '').strip()
+            cleaned['role'] = cleaned.get('role') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            return cleaned
+
+        filtered_recs = [_clean_show(rec) for rec in filtered_recs if (rec.get('title') or '').strip()]
+        filtered_count = len(filtered_recs)
+        featured_people = [_clean_person(p) for p in featured_people if (p.get('name') or '').strip()]
+
+        print(f"  → Cast/Crew show recs: {model_recs_count}, after filtering: {filtered_count}")
 
         # TMDB enrichment
         enriched_recs = []
@@ -4465,20 +4627,37 @@ async def get_magic_movies(
     try:
         result = supabase.table('magic_movies_cache').select('*').eq('device_id', device_id).execute()
 
+        def _clean_movie(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            score = cleaned.get('relevance_score') or cleaned.get('match_score') or 0
+            cleaned['relevance_score'] = int(score)
+            cleaned['match_score'] = int(score)
+            cleaned['director'] = cleaned.get('director')
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
         if not result.data:
             return {
-                "section_title": None,
-                "section_theme": None,
+                "section_title": "Magic Movies",
+                "section_theme": "",
                 "recommendations": [],
                 "generated_at": None,
                 "next_generation_at": None
             }
 
         cache = result.data[0]
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_movie(r) for r in recs_raw if (r.get('title') or '').strip()]
+
         return {
-            "section_title": cache.get('section_title'),
-            "section_theme": cache.get('section_theme'),
-            "recommendations": cache.get('recommendations', []),
+            "section_title": cache.get('section_title') or "Magic Movies",
+            "section_theme": cache.get('section_theme') or "",
+            "recommendations": recs,
             "generated_at": cache.get('generated_at'),
             "next_generation_at": cache.get('next_generation_at'),
             "generation_duration_ms": cache.get('generation_duration_ms'),
@@ -4529,9 +4708,31 @@ async def get_magic_movies_cast_crew(
     try:
         result = supabase.table('magic_movies_cast_crew_cache').select('*').eq('device_id', device_id).execute()
 
+        def _clean_movie(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            score = cleaned.get('relevance_score') or cleaned.get('match_score') or 0
+            cleaned['relevance_score'] = int(score)
+            cleaned['match_score'] = int(score)
+            cleaned['director'] = cleaned.get('director')
+            cleaned['featured_person'] = cleaned.get('featured_person') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        def _clean_person(p: dict) -> dict:
+            cleaned = dict(p)
+            cleaned['name'] = (cleaned.get('name') or '').strip()
+            cleaned['role'] = cleaned.get('role') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            return cleaned
+
         if not result.data:
             return {
-                "section_title": None,
+                "section_title": "Magic Cast & Crew",
                 "featured_people": [],
                 "recommendations": [],
                 "generated_at": None,
@@ -4539,10 +4740,15 @@ async def get_magic_movies_cast_crew(
             }
 
         cache = result.data[0]
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_movie(r) for r in recs_raw if (r.get('title') or '').strip()]
+        featured_raw = cache.get('featured_people') or []
+        featured = [_clean_person(p) for p in featured_raw if (p.get('name') or '').strip()]
+
         return {
-            "section_title": cache.get('section_title'),
-            "featured_people": cache.get('featured_people', []),
-            "recommendations": cache.get('recommendations', []),
+            "section_title": cache.get('section_title') or "Magic Cast & Crew",
+            "featured_people": featured,
+            "recommendations": recs,
             "generated_at": cache.get('generated_at'),
             "next_generation_at": cache.get('next_generation_at'),
             "generation_duration_ms": cache.get('generation_duration_ms'),
@@ -4593,20 +4799,37 @@ async def get_magic_shows(
     try:
         result = supabase.table('magic_shows_cache').select('*').eq('device_id', device_id).execute()
 
+        def _clean_show(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            score = cleaned.get('relevance_score') or cleaned.get('match_score') or 0
+            cleaned['relevance_score'] = int(score)
+            cleaned['match_score'] = int(score)
+            cleaned['seasons'] = int(cleaned.get('seasons') or 0)
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
         if not result.data:
             return {
-                "section_title": None,
-                "section_theme": None,
+                "section_title": "Magic Shows",
+                "section_theme": "",
                 "recommendations": [],
                 "generated_at": None,
                 "next_generation_at": None
             }
 
         cache = result.data[0]
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_show(r) for r in recs_raw if (r.get('title') or '').strip()]
+
         return {
-            "section_title": cache.get('section_title'),
-            "section_theme": cache.get('section_theme'),
-            "recommendations": cache.get('recommendations', []),
+            "section_title": cache.get('section_title') or "Magic Shows",
+            "section_theme": cache.get('section_theme') or "",
+            "recommendations": recs,
             "generated_at": cache.get('generated_at'),
             "next_generation_at": cache.get('next_generation_at'),
             "generation_duration_ms": cache.get('generation_duration_ms'),
@@ -4657,9 +4880,31 @@ async def get_magic_shows_cast_crew(
     try:
         result = supabase.table('magic_shows_cast_crew_cache').select('*').eq('device_id', device_id).execute()
 
+        def _clean_show(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            score = cleaned.get('relevance_score') or cleaned.get('match_score') or 0
+            cleaned['relevance_score'] = int(score)
+            cleaned['match_score'] = int(score)
+            cleaned['seasons'] = int(cleaned.get('seasons') or 0)
+            cleaned['featured_person'] = cleaned.get('featured_person') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            return cleaned
+
+        def _clean_person(p: dict) -> dict:
+            cleaned = dict(p)
+            cleaned['name'] = (cleaned.get('name') or '').strip()
+            cleaned['role'] = cleaned.get('role') or ''
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            return cleaned
+
         if not result.data:
             return {
-                "section_title": None,
+                "section_title": "Magic Cast & Crew",
                 "featured_people": [],
                 "recommendations": [],
                 "generated_at": None,
@@ -4667,10 +4912,15 @@ async def get_magic_shows_cast_crew(
             }
 
         cache = result.data[0]
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_show(r) for r in recs_raw if (r.get('title') or '').strip()]
+        featured_raw = cache.get('featured_people') or []
+        featured = [_clean_person(p) for p in featured_raw if (p.get('name') or '').strip()]
+
         return {
-            "section_title": cache.get('section_title'),
-            "featured_people": cache.get('featured_people', []),
-            "recommendations": cache.get('recommendations', []),
+            "section_title": cache.get('section_title') or "Magic Cast & Crew",
+            "featured_people": featured,
+            "recommendations": recs,
             "generated_at": cache.get('generated_at'),
             "next_generation_at": cache.get('next_generation_at'),
             "generation_duration_ms": cache.get('generation_duration_ms'),

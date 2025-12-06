@@ -464,14 +464,12 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
 
     subscriber_data = rc_response.json()
     subscriber = subscriber_data.get("subscriber", {})
-    if subscriber.get("is_sandbox"):
-        logger.warning(
-            "🚫 Sandbox subscription detected for %s - rejecting",
+    # RevenueCat sometimes omits the sandbox flag for TestFlight/anonymous IDs.
+    is_sandbox = (subscriber.get("is_sandbox") is True) or rc_customer_id.startswith("$RCAnonymousID")
+    if is_sandbox:
+        logger.info(
+            "🧪 Sandbox/TestFlight subscription detected for %s - treating entitlements as active",
             rc_customer_id[:16],
-        )
-        raise HTTPException(
-            status_code=403,
-            detail="Sandbox/TestFlight subscriptions are not supported. Purchase a production Zagreus plan.",
         )
 
     entitlements = subscriber.get("entitlements", {})
@@ -502,13 +500,17 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
                     expires_str,
                 )
 
-        is_active_field = ent.get("is_active")
-        if is_active_field is None:
-            is_active = expires_dt and expires_dt > datetime.now(timezone.utc)
+        if is_sandbox:
+            # Treat sandbox/TestFlight entitlements as active when present
+            is_active = True
         else:
-            is_active = bool(is_active_field) and (
-                not expires_dt or expires_dt > datetime.now(timezone.utc)
-            )
+            is_active_field = ent.get("is_active")
+            if is_active_field is None:
+                is_active = expires_dt and expires_dt > datetime.now(timezone.utc)
+            else:
+                is_active = bool(is_active_field) and (
+                    not expires_dt or expires_dt > datetime.now(timezone.utc)
+                )
 
         return bool(is_active), expires_dt
 

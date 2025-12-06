@@ -1798,6 +1798,7 @@ def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> D
         # Check if generation is already in progress
         existing = supabase.table('magic_movies_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
 
+        cache = {}
         if existing.data:
             cache = existing.data[0]
 
@@ -1814,9 +1815,13 @@ def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> D
                     print(f"  ℹ️  Magic Movies generated {age_days:.1f} days ago - no regeneration needed")
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
-        # Mark as generating
+        # Mark as generating with non-null defaults to satisfy NOT NULL constraints
         supabase.table('magic_movies_cache').upsert({
             'device_id': device_id,
+            'section_title': cache.get('section_title') or "Magic Movies",
+            'section_theme': cache.get('section_theme') or "",
+            'recommendations': cache.get('recommendations') or [],
+            'history': cache.get('history') or [],
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
@@ -1825,7 +1830,14 @@ def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> D
         library_result = supabase.table('library_cache').select('movies').eq('device_id', device_id).execute()
 
         if not library_result.data:
-            supabase.table('magic_movies_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            supabase.table('magic_movies_cache').upsert({
+                'device_id': device_id,
+                'section_title': cache.get('section_title') or "Magic Movies",
+                'section_theme': cache.get('section_theme') or "",
+                'recommendations': cache.get('recommendations') or [],
+                'history': cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
             return {"error": "Library not synced. Please sync your library first."}
 
         library = library_result.data[0]
@@ -2000,7 +2012,15 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         import traceback
         traceback.print_exc()
         try:
-            supabase.table('magic_movies_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            fallback_cache = cache if 'cache' in locals() else {}
+            supabase.table('magic_movies_cache').upsert({
+                'device_id': device_id,
+                'section_title': fallback_cache.get('section_title') or "Magic Movies",
+                'section_theme': fallback_cache.get('section_theme') or "",
+                'recommendations': fallback_cache.get('recommendations') or [],
+                'history': fallback_cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
         except:
             pass
         return {"error": str(e)}
@@ -2015,6 +2035,7 @@ def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ul
     try:
         existing = supabase.table('magic_movies_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
 
+        cache = {}
         if existing.data:
             cache = existing.data[0]
             if cache.get('is_generating'):
@@ -2028,16 +2049,34 @@ def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ul
 
         supabase.table('magic_movies_cast_crew_cache').upsert({
             'device_id': device_id,
+            'section_title': cache.get('section_title') or "Magic Cast & Crew",
+            'featured_people': cache.get('featured_people') or [],
+            'recommendations': cache.get('recommendations') or [],
+            'history': cache.get('history') or [],
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
 
         # Fetch library and people
         library_result = supabase.table('library_cache').select('movies').eq('device_id', device_id).execute()
-        people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+        try:
+            people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+        except Exception as pe:
+            # Handle missing table or other schema issues by falling back to empty people data
+            print(f"⚠️  People cache unavailable, continuing without people data: {pe}")
+            class _Empty:
+                data = []
+            people_result = _Empty()
 
         if not library_result.data:
-            supabase.table('magic_movies_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            supabase.table('magic_movies_cast_crew_cache').upsert({
+                'device_id': device_id,
+                'section_title': cache.get('section_title') or "Magic Cast & Crew",
+                'featured_people': cache.get('featured_people') or [],
+                'recommendations': cache.get('recommendations') or [],
+                'history': cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
             return {"error": "Library not synced."}
 
         movies_in_library = library_result.data[0].get('movies', [])
@@ -2199,7 +2238,15 @@ Pick 1-3 key people and create a themed section around their filmography."""
         import traceback
         traceback.print_exc()
         try:
-            supabase.table('magic_movies_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            fallback_cache = cache if 'cache' in locals() else {}
+            supabase.table('magic_movies_cast_crew_cache').upsert({
+                'device_id': device_id,
+                'section_title': fallback_cache.get('section_title') or "Magic Cast & Crew",
+                'featured_people': fallback_cache.get('featured_people') or [],
+                'recommendations': fallback_cache.get('recommendations') or [],
+                'history': fallback_cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
         except:
             pass
         return {"error": str(e)}
@@ -2214,6 +2261,7 @@ def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Di
     try:
         existing = supabase.table('magic_shows_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
 
+        cache = {}
         if existing.data:
             cache = existing.data[0]
             if cache.get('is_generating'):
@@ -2227,6 +2275,10 @@ def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Di
 
         supabase.table('magic_shows_cache').upsert({
             'device_id': device_id,
+            'section_title': cache.get('section_title') or "Magic Shows",
+            'section_theme': cache.get('section_theme') or "",
+            'recommendations': cache.get('recommendations') or [],
+            'history': cache.get('history') or [],
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
@@ -2234,7 +2286,14 @@ def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Di
         library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
 
         if not library_result.data:
-            supabase.table('magic_shows_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            supabase.table('magic_shows_cache').upsert({
+                'device_id': device_id,
+                'section_title': cache.get('section_title') or "Magic Shows",
+                'section_theme': cache.get('section_theme') or "",
+                'recommendations': cache.get('recommendations') or [],
+                'history': cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
             return {"error": "Library not synced."}
 
         shows_in_library = library_result.data[0].get('shows', [])
@@ -2383,7 +2442,15 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         import traceback
         traceback.print_exc()
         try:
-            supabase.table('magic_shows_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            fallback_cache = cache if 'cache' in locals() else {}
+            supabase.table('magic_shows_cache').upsert({
+                'device_id': device_id,
+                'section_title': fallback_cache.get('section_title') or "Magic Shows",
+                'section_theme': fallback_cache.get('section_theme') or "",
+                'recommendations': fallback_cache.get('recommendations') or [],
+                'history': fallback_cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
         except:
             pass
         return {"error": str(e)}
@@ -2398,6 +2465,7 @@ def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ult
     try:
         existing = supabase.table('magic_shows_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
 
+        cache = {}
         if existing.data:
             cache = existing.data[0]
             if cache.get('is_generating'):
@@ -2411,15 +2479,33 @@ def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ult
 
         supabase.table('magic_shows_cast_crew_cache').upsert({
             'device_id': device_id,
+            'section_title': cache.get('section_title') or "Magic Cast & Crew",
+            'featured_people': cache.get('featured_people') or [],
+            'recommendations': cache.get('recommendations') or [],
+            'history': cache.get('history') or [],
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
 
         library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
-        people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+        try:
+            people_result = supabase.table('people_cache').select('people').eq('device_id', device_id).execute()
+        except Exception as pe:
+            # Handle missing table or schema cache issues by falling back to empty people data
+            print(f"⚠️  People cache unavailable, continuing without people data: {pe}")
+            class _Empty:
+                data = []
+            people_result = _Empty()
 
         if not library_result.data:
-            supabase.table('magic_shows_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            supabase.table('magic_shows_cast_crew_cache').upsert({
+                'device_id': device_id,
+                'section_title': cache.get('section_title') or "Magic Cast & Crew",
+                'featured_people': cache.get('featured_people') or [],
+                'recommendations': cache.get('recommendations') or [],
+                'history': cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
             return {"error": "Library not synced."}
 
         shows_in_library = library_result.data[0].get('shows', [])
@@ -2580,7 +2666,15 @@ Pick 1-3 key people and create a themed section around their TV work."""
         import traceback
         traceback.print_exc()
         try:
-            supabase.table('magic_shows_cast_crew_cache').upsert({'device_id': device_id, 'is_generating': False}, on_conflict='device_id').execute()
+            fallback_cache = cache if 'cache' in locals() else {}
+            supabase.table('magic_shows_cast_crew_cache').upsert({
+                'device_id': device_id,
+                'section_title': fallback_cache.get('section_title') or "Magic Cast & Crew",
+                'featured_people': fallback_cache.get('featured_people') or [],
+                'recommendations': fallback_cache.get('recommendations') or [],
+                'history': fallback_cache.get('history') or [],
+                'is_generating': False
+            }, on_conflict='device_id').execute()
         except:
             pass
         return {"error": str(e)}

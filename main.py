@@ -2842,6 +2842,297 @@ Pick 1-3 key people and create a themed section around their TV work."""
         return {"error": str(e)}
 
 
+# ============================================================================
+# MAGIC PEOPLE - AI-generated person recommendations based on library patterns
+# ============================================================================
+
+MAGIC_PEOPLE_PROMPT = """You are a film curator specializing in PERSON recommendations.
+
+Your task: Analyze the user's library and viewing patterns, then recommend 12-15 PEOPLE (actors, directors, cinematographers, composers, etc.) they should explore.
+
+IMPORTANT: You must CREATE THE SECTION TITLE based on the pattern you detect!
+
+EXAMPLE SECTION TITLES:
+- "Directors Behind Your Favorites"
+- "Character Actors You'll Love"
+- "Rising Stars to Watch"
+- "Cinematographers Who Paint with Light"
+- "Composers Scoring Your Life"
+- "Cult Film Icons"
+- "International Auteurs"
+- "Genre Masters"
+
+ANALYZE FOR:
+- Directors whose style matches their library
+- Actors who appear in films similar to their tastes
+- Cinematographers with distinctive visual styles they'd appreciate
+- Composers whose scores fit their genre preferences
+- Writers behind their favorite screenplays
+- Hidden talent behind beloved films
+
+AVOID:
+- Extremely mainstream celebrities everyone knows (unless specifically relevant)
+- People with no significant filmography
+- People already heavily represented in their library
+
+OUTPUT FORMAT (JSON):
+{
+  "section_title": "Your Creative Section Title",
+  "section_theme": "One sentence describing why these people match their taste",
+  "recommendations": [
+    {
+      "name": "Person Name",
+      "known_for": "Acting/Directing/Cinematography/Composing/etc.",
+      "reason": "Why this person matches their taste - be specific about their work",
+      "match_score": 8
+    }
+  ]
+}
+
+The match_score (1-10) indicates relevance to user's library:
+- 9-10 = Perfect match, similar to artists they clearly love
+- 6-8 = Good fit based on genre/style preferences
+- 1-5 = Weak connection (avoid these)
+
+Focus on DISCOVERABLE people - those whose work they'd genuinely enjoy exploring!"""
+
+
+def generate_magic_people(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+    """Generate AI-powered person recommendations for Mega/Ultra users.
+    
+    Analyzes library + watch history to recommend actors, directors, cinematographers, etc.
+    """
+    
+    print(f"\n👥✨ MAGIC PEOPLE GENERATION STARTED for device {device_id[:8]}...")
+    print(f"  → Subscription tier: {subscription_tier.upper()}")
+    start_time = time.time()
+    
+    try:
+        # Check existing cache
+        existing = supabase.table('magic_people_cache').select('*').eq('device_id', device_id).execute()
+        cache = existing.data[0] if existing.data else {}
+        history = cache.get('history') or []
+        
+        if cache.get('is_generating'):
+            print("  ⏭️  Generation already in progress")
+            return {"error": "Generation already in progress. Please wait."}
+        
+        if cache.get('generated_at'):
+            last_gen = datetime.fromisoformat(cache['generated_at'])
+            age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+            if age_days < 7:
+                print(f"  ℹ️  Magic People generated {age_days:.1f} days ago - no regeneration needed")
+                return {"status": "up_to_date", "age_days": round(age_days, 1)}
+        
+        # Mark as generating
+        supabase.table('magic_people_cache').upsert({
+            'device_id': device_id,
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='device_id').execute()
+        
+        # Fetch library
+        print("  → Fetching library cache...")
+        library_result = supabase.table('library_cache').select('movies, shows').eq('device_id', device_id).execute()
+        
+        if not library_result.data:
+            print("  ❌ No library cache found")
+            supabase.table('magic_people_cache').upsert({
+                'device_id': device_id,
+                'is_generating': False
+            }, on_conflict='device_id').execute()
+            return {"error": "Library not synced. Please sync your library first."}
+        
+        library = library_result.data[0]
+        movies_in_library = library.get('movies', [])
+        shows_in_library = library.get('shows', [])
+        print(f"  ✓ Found {len(movies_in_library)} movies and {len(shows_in_library)} shows")
+        
+        # Get watch history
+        watch_result = supabase.table('watch_history_cache').select('viewing_stats, top_content').eq('device_id', device_id).execute()
+        watch_data = watch_result.data[0] if watch_result.data else {}
+        
+        # Build context for AI
+        library_genres = {}
+        library_years = {}
+        library_directors = {}
+        for movie in movies_in_library[:100]:
+            for genre in movie.get('genres', []):
+                library_genres[genre] = library_genres.get(genre, 0) + 1
+            year = movie.get('year')
+            if year:
+                decade = (year // 10) * 10
+                library_years[f"{decade}s"] = library_years.get(f"{decade}s", 0) + 1
+            director = movie.get('director')
+            if director:
+                library_directors[director] = library_directors.get(director, 0) + 1
+        
+        top_genres = sorted(library_genres.items(), key=lambda x: x[1], reverse=True)[:8]
+        top_decades = sorted(library_years.items(), key=lambda x: x[1], reverse=True)[:5]
+        top_directors = sorted(library_directors.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        viewing_stats = watch_data.get('viewing_stats', {})
+        
+        # Excluded names from recent history
+        excluded_names = [item['name'] for item in history if item.get('name')]
+        
+        context = f"""LIBRARY ANALYSIS:
+- Total Movies: {len(movies_in_library)}
+- Total Shows: {len(shows_in_library)}
+- Top Genres: {', '.join([f"{g[0]} ({g[1]})" for g in top_genres])}
+- Top Decades: {', '.join([f"{d[0]} ({d[1]})" for d in top_decades])}
+- Directors in Library: {', '.join([f"{d[0]} ({d[1]} films)" for d in top_directors[:5]])}
+
+WATCH HISTORY:
+- Total Plays: {viewing_stats.get('total_plays', 0)}
+- Top Watched Genres: {', '.join(list(viewing_stats.get('top_genres', {}).keys())[:5])}
+
+EXCLUDED NAMES (recently recommended):
+{', '.join(excluded_names[:30]) if excluded_names else 'None'}
+
+Based on this profile, recommend 12-15 people (actors, directors, cinematographers, composers) they should explore."""
+        
+        print("  → Calling OpenAI for magic people generation...")
+        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        
+        response = openai_client.responses.create(
+            model=model,
+            instructions=MAGIC_PEOPLE_PROMPT,
+            input=context,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "magic_people_recommendations",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "section_title": {"type": "string"},
+                            "section_theme": {"type": "string"},
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": {"type": "string"},
+                                        "known_for": {"type": "string"},
+                                        "reason": {"type": "string"},
+                                        "match_score": {"type": "integer"}
+                                    },
+                                    "required": ["name", "known_for", "reason", "match_score"],
+                                    "additionalProperties": False
+                                }
+                            }
+                        },
+                        "required": ["section_title", "section_theme", "recommendations"],
+                        "additionalProperties": False
+                    }
+                }
+            },
+            max_output_tokens=8000
+        )
+        
+        # Parse response
+        section_title = "Magic People"
+        section_theme = ""
+        recommendations = []
+        
+        for item in response.output:
+            if item.type == "message" and hasattr(item, 'content') and item.content:
+                for content_item in item.content:
+                    if content_item.type == "output_text" and hasattr(content_item, 'text'):
+                        result = json.loads(content_item.text)
+                        section_title = result.get('section_title', 'Magic People')
+                        section_theme = result.get('section_theme', '')
+                        recommendations = result.get('recommendations', [])
+                        break
+                break
+        
+        print(f"  ✓ Generated section: \"{section_title}\" with {len(recommendations)} people")
+        
+        # Filter out excluded names
+        excluded_lower = {n.lower() for n in excluded_names}
+        filtered_recs = [
+            rec for rec in recommendations
+            if rec.get('name', '').lower() not in excluded_lower
+            and rec.get('match_score', 0) >= 6
+        ]
+        
+        # TMDB enrichment for person data
+        print(f"  → Enriching {len(filtered_recs)} people with TMDB data...")
+        enriched_recs = []
+        for rec in filtered_recs:
+            try:
+                name = rec.get('name', '')
+                search_url = "https://api.themoviedb.org/3/search/person"
+                params = {"api_key": TMDB_API_KEY, "query": name}
+                
+                response = httpx.get(search_url, params=params, timeout=5.0)
+                if response.status_code == 200 and response.json().get("results"):
+                    person = response.json()["results"][0]
+                    rec['tmdb_id'] = person.get('id')
+                    rec['profile_path'] = person.get('profile_path', '')
+                    # Update known_for if TMDB has better info
+                    tmdb_known_for = person.get('known_for_department', '')
+                    if tmdb_known_for:
+                        rec['known_for'] = tmdb_known_for
+                    print(f"    ✓ {name}: tmdb_id={rec['tmdb_id']}")
+                else:
+                    rec['tmdb_id'] = None
+                    rec['profile_path'] = ''
+                    print(f"    ⚠ {name}: No TMDB match")
+                enriched_recs.append(rec)
+            except Exception as e:
+                rec['tmdb_id'] = None
+                rec['profile_path'] = ''
+                enriched_recs.append(rec)
+        
+        # Update history
+        new_history = [{"name": rec['name'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
+        updated_history = new_history + history
+        eight_weeks_ago = datetime.now() - timedelta(weeks=8)
+        updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
+        
+        duration_ms = int((time.time() - start_time) * 1000)
+        next_gen = datetime.now() + timedelta(days=7)
+        
+        supabase.table('magic_people_cache').upsert({
+            'device_id': device_id,
+            'section_title': section_title,
+            'section_theme': section_theme,
+            'recommendations': enriched_recs,
+            'history': updated_history,
+            'generated_at': datetime.now().isoformat(),
+            'is_generating': False,
+            'next_generation_at': next_gen.isoformat(),
+            'generation_duration_ms': duration_ms,
+            'prompt_version': 'v1'
+        }, on_conflict='device_id').execute()
+        
+        print(f"\n✅ MAGIC PEOPLE GENERATED: \"{section_title}\" ({duration_ms}ms)")
+        
+        return {
+            "status": "success",
+            "section_title": section_title,
+            "section_theme": section_theme,
+            "recommendations_count": len(enriched_recs),
+            "generation_duration_ms": duration_ms
+        }
+    
+    except Exception as e:
+        print(f"❌ ERROR generating magic people: {e}")
+        import traceback
+        traceback.print_exc()
+        try:
+            supabase.table('magic_people_cache').upsert({
+                'device_id': device_id,
+                'is_generating': False
+            }, on_conflict='device_id').execute()
+        except:
+            pass
+        return {"error": str(e)}
+
+
 # Function for Responses API
 def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
     """Request episode details for a show from device - ZERO-KNOWLEDGE on-demand fetch!"""
@@ -4930,6 +5221,83 @@ async def get_magic_shows_cast_crew(
     except Exception as e:
         print(f"❌ Get magic shows cast & crew error: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve magic shows cast & crew")
+
+@app.post("/recommendations/magic-people/generate")
+async def generate_magic_people_endpoint(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="ultra")
+):
+    """Generate AI-powered PERSON recommendations for Mega/Ultra users."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    try:
+        result = generate_magic_people(device_id, subscription_tier)
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Magic People endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Magic people generation failed")
+
+@app.get("/recommendations/magic-people")
+async def get_magic_people(
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached magic people recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('magic_people_cache').select('*').eq('device_id', device_id).execute()
+
+        def _clean_person(rec: dict) -> dict:
+            cleaned = dict(rec)
+            cleaned['name'] = (cleaned.get('name') or '').strip()
+            cleaned['known_for'] = cleaned.get('known_for') or 'Acting'
+            cleaned['reason'] = cleaned.get('reason') or ''
+            cleaned['match_score'] = int(cleaned.get('match_score') or 0)
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0) if cleaned.get('tmdb_id') else None
+            cleaned['profile_path'] = cleaned.get('profile_path') or ''
+            return cleaned
+
+        if not result.data:
+            return {
+                "section_title": "Magic People",
+                "section_theme": "",
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_person(r) for r in recs_raw if (r.get('name') or '').strip()]
+
+        return {
+            "section_title": cache.get('section_title') or "Magic People",
+            "section_theme": cache.get('section_theme') or "",
+            "recommendations": recs,
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+            "is_generating": cache.get('is_generating', False)
+        }
+
+    except Exception as e:
+        print(f"❌ Get magic people error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve magic people")
 
 @app.get("/")
 async def root():

@@ -3281,7 +3281,7 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
         return {"error": str(e)}
 
 # Function for Responses API
-def search_movies(query: str) -> Dict[str, Any]:
+async def search_movies(query: str) -> Dict[str, Any]:
     """Search for movies on TMDB with light normalization and year hinting."""
     print(f"🔧 TOOL CALLED: search_movies - Query: {query}")
 
@@ -3322,12 +3322,12 @@ def search_movies(query: str) -> Dict[str, Any]:
             print("  → using cached TMDB search")
             return cached
 
-        def _tmdb_search(q: str, year: Optional[int]) -> Dict[str, Any]:
+        async def _tmdb_search(client: httpx.AsyncClient, q: str, year: Optional[int]) -> Dict[str, Any]:
             params = {"api_key": TMDB_API_KEY, "query": q, "include_adult": False}
             if year is not None:
                 params["year"] = year
 
-            resp = httpx.get(base_url, params=params, timeout=5.0)
+            resp = await client.get(base_url, params=params, timeout=5.0)
             if resp.status_code != 200:
                 return {"movies": [], "error": f"API error: {resp.status_code}"}
 
@@ -3359,12 +3359,13 @@ def search_movies(query: str) -> Dict[str, Any]:
 
             return {"movies": movies, "total_found": len(results)}
 
-        # First attempt: normalized title + year (if found)
-        result = _tmdb_search(title, year_hint)
+        async with httpx.AsyncClient() as client:
+            # First attempt: normalized title + year (if found)
+            result = await _tmdb_search(client, title, year_hint)
 
-        # Fallback: if no hits and we had a year, try without year
-        if result.get("total_found", 0) == 0 and year_hint is not None:
-            result = _tmdb_search(title, None)
+            # Fallback: if no hits and we had a year, try without year
+            if result.get("total_found", 0) == 0 and year_hint is not None:
+                result = await _tmdb_search(client, title, None)
 
         # Cache and return
         search_movies._cache[cache_key] = result
@@ -3375,21 +3376,23 @@ def search_movies(query: str) -> Dict[str, Any]:
         return {"movies": [], "error": str(e)}
 
 # Function for Responses API
-def search_shows(query: str) -> Dict[str, Any]:
+async def search_shows(query: str) -> Dict[str, Any]:
     """Search for TV shows on TMDB and return a list of results"""
     print(f"🔧 TOOL CALLED: search_shows - Query: {query}")
-    
+
     try:
         search_url = "https://api.themoviedb.org/3/search/tv"
         params = {
             "api_key": TMDB_API_KEY,
             "query": query
         }
-        
-        response = httpx.get(search_url, params=params, timeout=5.0)
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
+
         if response.status_code == 200:
             results = response.json().get("results", [])
-            
+
             # Return top 5 results with relevant info
             shows = []
             for item in results[:5]:
@@ -3399,7 +3402,7 @@ def search_shows(query: str) -> Dict[str, Any]:
                         year = int(item["first_air_date"][:4])
                     except:
                         pass
-                
+
                 shows.append({
                     "tmdb_id": item["id"],
                     "title": item["name"],
@@ -3407,16 +3410,16 @@ def search_shows(query: str) -> Dict[str, Any]:
                     "poster_path": item.get("poster_path"),
                     "overview": item.get("overview", "")[:200] + "..." if item.get("overview") else ""
                 })
-            
+
             print(f"  ✓ Found {len(shows)} TV show results")
             return {"shows": shows, "total_found": len(results)}
-        
+
         return {"shows": [], "error": f"API error: {response.status_code}"}
     except Exception as e:
         return {"shows": [], "error": str(e)}
 
 # Function for Responses API
-def search_person(query: str) -> Dict[str, Any]:
+async def search_person(query: str) -> Dict[str, Any]:
     """Search for people (actors, directors, etc.) on TMDB with gigachad relevance ranking"""
     print(f"🔧 TOOL CALLED: search_person - Query: {query}")
 
@@ -3428,7 +3431,9 @@ def search_person(query: str) -> Dict[str, Any]:
             "include_adult": False
         }
 
-        response = httpx.get(search_url, params=params, timeout=5.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(search_url, params=params, timeout=5.0)
+
         if response.status_code == 200:
             results = response.json().get("results", [])
 
@@ -3461,7 +3466,7 @@ def search_person(query: str) -> Dict[str, Any]:
         return {"people": [], "error": str(e)}
 
 # Function for Responses API
-def get_person_credits(person_id: int) -> Dict[str, Any]:
+async def get_person_credits(person_id: int) -> Dict[str, Any]:
     """Get all movie and TV credits for a person"""
     print(f"🔧 TOOL CALLED: get_person_credits - Person ID: {person_id}")
 
@@ -3471,7 +3476,9 @@ def get_person_credits(person_id: int) -> Dict[str, Any]:
             "api_key": TMDB_API_KEY
         }
 
-        response = httpx.get(credits_url, params=params, timeout=5.0)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(credits_url, params=params, timeout=5.0)
+
         if response.status_code == 200:
             data = response.json()
 
@@ -4219,18 +4226,18 @@ def get_unified_tools():
 
 
 # Function dispatcher
-def execute_function(function_name: str, arguments: dict, device_id: str) -> dict:
+async def execute_function(function_name: str, arguments: dict, device_id: str) -> dict:
     """Execute a function call and return the result - ZERO-KNOWLEDGE!"""
     try:
-        # Discover tools
+        # Discover tools - TMDB calls are async
         if function_name == "search_movies":
-            return search_movies(arguments["query"])
+            return await search_movies(arguments["query"])
         elif function_name == "search_shows":
-            return search_shows(arguments["query"])
+            return await search_shows(arguments["query"])
         elif function_name == "search_person":
-            return search_person(arguments["query"])
+            return await search_person(arguments["query"])
         elif function_name == "get_person_credits":
-            return get_person_credits(arguments["person_id"])
+            return await get_person_credits(arguments["person_id"])
         elif function_name == "add_to_stage":
             return add_to_stage(
                 arguments["operation"],
@@ -4569,7 +4576,7 @@ async def chat(
 
                     print(f"  🔧 {function_name}({arguments})")
 
-                    result = execute_function(function_name, arguments, device_id)
+                    result = await execute_function(function_name, arguments, device_id)
 
                     # Check if result contains a stage_id (from add_instantly or add_to_stage)
                     if isinstance(result, dict) and result.get('stage_id'):

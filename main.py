@@ -18,6 +18,7 @@ from upstash_redis import Redis
 import hashlib
 import hmac
 import base64
+import asyncio
 
 # Configure logging
 logging.basicConfig(
@@ -103,6 +104,109 @@ RATE_LIMIT_MEGA_REQUESTS = 15  # Mega: 15 messages per 12 hours
 RATE_LIMIT_WINDOW = 43200  # 12 hours in seconds
 AGENT_TIMEOUT_SECONDS = int(os.getenv("AGENT_TIMEOUT_SECONDS", "300"))  # default 5 minutes
 MAX_CHAT_HISTORY_MESSAGES = int(os.getenv("MAX_CHAT_HISTORY_MESSAGES", "12"))
+
+# ====== ASYNC TMDB ENRICHMENT ======
+# Concurrent TMDB API calls for faster recommendation enrichment
+
+async def _fetch_tmdb_single(
+    client: httpx.AsyncClient,
+    rec: Dict[str, Any],
+    search_type: str,  # "movie", "tv", or "person"
+    verbose: bool = False
+) -> Dict[str, Any]:
+    """Fetch TMDB data for a single recommendation asynchronously."""
+    try:
+        if search_type == "person":
+            name = rec.get('name', '')
+            search_url = "https://api.themoviedb.org/3/search/person"
+            params = {"api_key": TMDB_API_KEY, "query": name}
+        else:
+            title = rec.get('title', '')
+            year = rec.get('year')
+            search_url = f"https://api.themoviedb.org/3/search/{search_type}"
+            params = {"api_key": TMDB_API_KEY, "query": title, "include_adult": False}
+            if year:
+                year_param = "first_air_date_year" if search_type == "tv" else "year"
+                params[year_param] = year
+
+        response = await client.get(search_url, params=params, timeout=5.0)
+
+        if response.status_code == 200:
+            results = response.json().get("results", [])
+            if results:
+                item = results[0]
+                rec['tmdb_id'] = item.get('id')
+                if search_type == "person":
+                    rec['profile_path'] = item.get('profile_path', '')
+                    tmdb_known_for = item.get('known_for_department', '')
+                    if tmdb_known_for:
+                        rec['known_for'] = tmdb_known_for
+                    if verbose:
+                        print(f"    ✓ {rec.get('name')}: tmdb_id={rec['tmdb_id']}")
+                else:
+                    rec['poster_path'] = item.get('poster_path', '')
+                    if verbose:
+                        print(f"    ✓ {rec.get('title')} ({rec.get('year')}): poster={rec['poster_path']}")
+            else:
+                rec['tmdb_id'] = None
+                if search_type == "person":
+                    rec['profile_path'] = ''
+                    if verbose:
+                        print(f"    ⚠ {rec.get('name')}: No TMDB match")
+                else:
+                    rec['poster_path'] = ''
+                    if verbose:
+                        print(f"    ⚠ {rec.get('title')} ({rec.get('year')}): No TMDB match")
+        else:
+            rec['tmdb_id'] = None
+            if search_type == "person":
+                rec['profile_path'] = ''
+            else:
+                rec['poster_path'] = ''
+            if verbose:
+                identifier = rec.get('name') if search_type == "person" else f"{rec.get('title')} ({rec.get('year')})"
+                print(f"    ❌ {identifier}: TMDB API error {response.status_code}")
+    except Exception as e:
+        rec['tmdb_id'] = None
+        if search_type == "person":
+            rec['profile_path'] = ''
+        else:
+            rec['poster_path'] = ''
+        if verbose:
+            identifier = rec.get('name') if search_type == "person" else rec.get('title')
+            print(f"    ❌ Error enriching {identifier}: {e}")
+
+    return rec
+
+
+async def enrich_with_tmdb_async(
+    recs: List[Dict[str, Any]],
+    search_type: str,  # "movie", "tv", or "person"
+    verbose: bool = False
+) -> List[Dict[str, Any]]:
+    """
+    Enrich recommendations with TMDB data concurrently.
+
+    Args:
+        recs: List of recommendation dicts with 'title'/'name' and optionally 'year'
+        search_type: "movie", "tv", or "person"
+        verbose: Whether to print progress logs
+
+    Returns:
+        List of enriched recommendation dicts with tmdb_id and poster_path/profile_path
+    """
+    if not recs:
+        return []
+
+    async with httpx.AsyncClient() as client:
+        tasks = [_fetch_tmdb_single(client, rec.copy(), search_type, verbose) for rec in recs]
+        enriched = await asyncio.gather(*tasks)
+
+    if verbose:
+        print(f"  ✓ Enriched {len(enriched)} recommendations with TMDB data")
+
+    return list(enriched)
+
 
 # ====== GIGACHAD RELEVANCE RANKING ======
 # Port of the sophisticated Flutter search ranking algorithm
@@ -985,7 +1089,7 @@ The obscurity_score (1-10) indicates how "deep cut" it is:
 
 Base your recommendations on their watch history patterns and library genres."""
 
-def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered hidden gem movie recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
@@ -1170,51 +1274,9 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
 
         print(f"  ✓ Filtered to {len(filtered_recs)} unique deep cuts")
 
-        # Enrich with TMDB data (poster_path, tmdb_id)
-        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data...")
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                title = rec.get('title', '')
-                year = rec.get('year')
-
-                # Search TMDB for this movie
-                search_url = "https://api.themoviedb.org/3/search/movie"
-                params = {
-                    "api_key": TMDB_API_KEY,
-                    "query": title,
-                    "include_adult": False
-                }
-                if year:
-                    params["year"] = year
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    if results:
-                        # Take the first result (most relevant)
-                        movie = results[0]
-                        rec['tmdb_id'] = movie.get('id')
-                        rec['poster_path'] = movie.get('poster_path', '')
-                        print(f"    ✓ {title} ({year}): poster={rec['poster_path']}")
-                    else:
-                        rec['tmdb_id'] = None
-                        rec['poster_path'] = ''
-                        print(f"    ⚠ {title} ({year}): No TMDB match")
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                    print(f"    ❌ {title} ({year}): TMDB API error {response.status_code}")
-
-                enriched_recs.append(rec)
-            except Exception as e:
-                print(f"    ❌ Error enriching {rec.get('title')}: {e}")
-                # Add without TMDB data
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
-
-        print(f"  ✓ Enriched {len(enriched_recs)} recommendations with TMDB data")
+        # Enrich with TMDB data (poster_path, tmdb_id) - ASYNC
+        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data (async)...")
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "movie", verbose=True)
 
         # Calculate generation duration
         duration_ms = int((time.time() - start_time) * 1000)
@@ -1297,7 +1359,7 @@ The popularity_score (1-10) indicates relevance and quality:
 
 Base your recommendations on their watch history patterns, favorite genres, and viewing habits."""
 
-def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered TV show recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
@@ -1479,51 +1541,9 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
 
         print(f"  ✓ Filtered to {len(filtered_recs)} unique show recommendations")
 
-        # Enrich with TMDB data (poster_path, tmdb_id)
-        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data...")
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                title = rec.get('title', '')
-                year = rec.get('year')
-
-                # Search TMDB for this TV show
-                search_url = "https://api.themoviedb.org/3/search/tv"
-                params = {
-                    "api_key": TMDB_API_KEY,
-                    "query": title,
-                    "include_adult": False
-                }
-                if year:
-                    params["first_air_date_year"] = year
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200:
-                    results = response.json().get("results", [])
-                    if results:
-                        # Take the first result (most relevant)
-                        show = results[0]
-                        rec['tmdb_id'] = show.get('id')
-                        rec['poster_path'] = show.get('poster_path', '')
-                        print(f"    ✓ {title} ({year}): poster={rec['poster_path']}")
-                    else:
-                        rec['tmdb_id'] = None
-                        rec['poster_path'] = ''
-                        print(f"    ⚠ {title} ({year}): No TMDB match")
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                    print(f"    ❌ {title} ({year}): TMDB API error {response.status_code}")
-
-                enriched_recs.append(rec)
-            except Exception as e:
-                print(f"    ❌ Error enriching {rec.get('title')}: {e}")
-                # Add without TMDB data
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
-
-        print(f"  ✓ Enriched {len(enriched_recs)} recommendations with TMDB data")
+        # Enrich with TMDB data (poster_path, tmdb_id) - ASYNC
+        print(f"  → Enriching {len(filtered_recs)} recommendations with TMDB data (async)...")
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "tv", verbose=True)
 
         # Calculate generation duration
         duration_ms = int((time.time() - start_time) * 1000)
@@ -1787,7 +1807,7 @@ OUTPUT FORMAT (JSON):
 BE CREATIVE. Focus on 1-3 people max. Make it feel like exploring their TV career!"""
 
 
-def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬✨ MAGIC MOVIES GENERATION STARTED for device {device_id[:8]}...")
@@ -1983,28 +2003,8 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
 
         print(f"  → Model recs: {model_recs_count}, after filtering: {filtered_count}")
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/movie"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    movie = response.json()["results"][0]
-                    rec['tmdb_id'] = movie.get('id')
-                    rec['poster_path'] = movie.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment - ASYNC
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "movie", verbose=False)
 
         # Update history (keep last 8 weeks)
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2062,7 +2062,7 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         return {"error": str(e)}
 
 
-def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬👥 MAGIC MOVIES CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
@@ -2259,28 +2259,8 @@ Pick 1-3 key people and create a themed section around their filmography."""
 
         print(f"  → Cast/Crew model recs: {model_recs_count}, after filtering: {filtered_count}")
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/movie"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    movie = response.json()["results"][0]
-                    rec['tmdb_id'] = movie.get('id')
-                    rec['poster_path'] = movie.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment - ASYNC
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "movie", verbose=False)
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2333,7 +2313,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
         return {"error": str(e)}
 
 
-def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺✨ MAGIC SHOWS GENERATION STARTED for device {device_id[:8]}...")
@@ -2500,28 +2480,8 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
 
         print(f"  → Model show recs: {model_recs_count}, after filtering: {filtered_count}")
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/tv"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["first_air_date_year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    show = response.json()["results"][0]
-                    rec['tmdb_id'] = show.get('id')
-                    rec['poster_path'] = show.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment - ASYNC
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "tv", verbose=False)
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2573,7 +2533,7 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         return {"error": str(e)}
 
 
-def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺👥 MAGIC SHOWS CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
@@ -2768,28 +2728,8 @@ Pick 1-3 key people and create a themed section around their TV work."""
 
         print(f"  → Cast/Crew show recs: {model_recs_count}, after filtering: {filtered_count}")
 
-        # TMDB enrichment
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                search_url = "https://api.themoviedb.org/3/search/tv"
-                params = {"api_key": TMDB_API_KEY, "query": rec.get('title', ''), "include_adult": False}
-                if rec.get('year'):
-                    params["first_air_date_year"] = rec['year']
-
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    show = response.json()["results"][0]
-                    rec['tmdb_id'] = show.get('id')
-                    rec['poster_path'] = show.get('poster_path', '')
-                else:
-                    rec['tmdb_id'] = None
-                    rec['poster_path'] = ''
-                enriched_recs.append(rec)
-            except Exception:
-                rec['tmdb_id'] = None
-                rec['poster_path'] = ''
-                enriched_recs.append(rec)
+        # TMDB enrichment - ASYNC
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "tv", verbose=False)
 
         # Update history
         new_history_items = [{"title": rec['title'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
@@ -2897,7 +2837,7 @@ The match_score (1-10) indicates relevance to user's library:
 Focus on DISCOVERABLE people - those whose work they'd genuinely enjoy exploring!"""
 
 
-def generate_magic_people(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_people(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
     """Generate AI-powered person recommendations for Mega/Ultra users.
     
     Analyzes library + watch history to recommend actors, directors, cinematographers, etc.
@@ -3058,35 +2998,10 @@ Based on this profile, recommend 12-15 people (actors, directors, cinematographe
             and rec.get('match_score', 0) >= 6
         ]
         
-        # TMDB enrichment for person data
-        print(f"  → Enriching {len(filtered_recs)} people with TMDB data...")
-        enriched_recs = []
-        for rec in filtered_recs:
-            try:
-                name = rec.get('name', '')
-                search_url = "https://api.themoviedb.org/3/search/person"
-                params = {"api_key": TMDB_API_KEY, "query": name}
-                
-                response = httpx.get(search_url, params=params, timeout=5.0)
-                if response.status_code == 200 and response.json().get("results"):
-                    person = response.json()["results"][0]
-                    rec['tmdb_id'] = person.get('id')
-                    rec['profile_path'] = person.get('profile_path', '')
-                    # Update known_for if TMDB has better info
-                    tmdb_known_for = person.get('known_for_department', '')
-                    if tmdb_known_for:
-                        rec['known_for'] = tmdb_known_for
-                    print(f"    ✓ {name}: tmdb_id={rec['tmdb_id']}")
-                else:
-                    rec['tmdb_id'] = None
-                    rec['profile_path'] = ''
-                    print(f"    ⚠ {name}: No TMDB match")
-                enriched_recs.append(rec)
-            except Exception as e:
-                rec['tmdb_id'] = None
-                rec['profile_path'] = ''
-                enriched_recs.append(rec)
-        
+        # TMDB enrichment for person data - ASYNC
+        print(f"  → Enriching {len(filtered_recs)} people with TMDB data (async)...")
+        enriched_recs = await enrich_with_tmdb_async(filtered_recs, "person", verbose=True)
+
         # Update history
         new_history = [{"name": rec['name'], "added_at": datetime.now().isoformat()} for rec in enriched_recs]
         updated_history = new_history + history
@@ -4756,7 +4671,7 @@ async def generate_deep_cuts_endpoint(
         print(f"  → Tier: {subscription_tier.upper()}")
 
         # Generate deep cuts (function handles rate limiting internally)
-        result = generate_deep_cuts(device_id, subscription_tier)
+        result = await generate_deep_cuts(device_id, subscription_tier)
 
         if "error" in result:
             # Return appropriate status code based on error
@@ -4824,7 +4739,7 @@ async def generate_up_next_endpoint(
         print(f"  → Tier: {subscription_tier.upper()}")
 
         # Generate show recommendations (function handles rate limiting internally)
-        result = generate_up_next(device_id, subscription_tier)
+        result = await generate_up_next(device_id, subscription_tier)
 
         if "error" in result:
             # Return appropriate status code based on error
@@ -4889,7 +4804,7 @@ async def generate_magic_movies_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_movies(device_id, subscription_tier)
+        result = await generate_magic_movies(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -4970,7 +4885,7 @@ async def generate_magic_movies_cast_crew_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_movies_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_movies_cast_crew(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -5061,7 +4976,7 @@ async def generate_magic_shows_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_shows(device_id, subscription_tier)
+        result = await generate_magic_shows(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -5142,7 +5057,7 @@ async def generate_magic_shows_cast_crew_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_shows_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_shows_cast_crew(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
@@ -5233,7 +5148,7 @@ async def generate_magic_people_endpoint(
     subscription_tier = x_subscription_tier.lower()
 
     try:
-        result = generate_magic_people(device_id, subscription_tier)
+        result = await generate_magic_people(device_id, subscription_tier)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():

@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
 import httpx
 import os
 from typing import Dict, Any, List, Optional, Tuple
@@ -65,8 +65,9 @@ async def mask_request_logging(request: Request, call_next):
 
     return response
 
-# Initialize OpenAI client
+# Initialize OpenAI clients (sync for backwards compat, async for non-blocking)
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+async_openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize Supabase client (for auth - will use user's token for RLS)
 supabase: Client = create_client(
@@ -1193,7 +1194,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
 
         # Call OpenAI with Responses API (required for GPT-5)
         # Note: GPT-5 models use Responses API, not Chat Completions
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=DEEP_CUTS_PROMPT,  # System prompt goes in instructions
             input=context,  # User content goes in input
@@ -1464,7 +1465,7 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
         print(f"  → Using model: {model}")
 
         # Call OpenAI with Responses API
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=UP_NEXT_PROMPT,
             input=context,
@@ -1902,7 +1903,7 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
 
         model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=MAGIC_MOVIES_PROMPT,
             input=context,
@@ -2138,7 +2139,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
 
         model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=MAGIC_MOVIES_CAST_CREW_PROMPT,
             input=context,
@@ -2381,7 +2382,7 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
 
         model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=MAGIC_SHOWS_PROMPT,
             input=context,
@@ -2607,7 +2608,7 @@ Pick 1-3 key people and create a themed section around their TV work."""
 
         model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=MAGIC_SHOWS_CAST_CREW_PROMPT,
             input=context,
@@ -2935,7 +2936,7 @@ Based on this profile, recommend 12-15 people (actors, directors, cinematographe
         print("  → Calling OpenAI for magic people generation...")
         model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
         
-        response = openai_client.responses.create(
+        response = await async_openai_client.responses.create(
             model=model,
             instructions=MAGIC_PEOPLE_PROMPT,
             input=context,
@@ -3068,34 +3069,27 @@ def get_show_episodes(show_title: str, device_id: str) -> Dict[str, Any]:
             'created_at': datetime.now().isoformat()
         }).execute()
 
-        # Wait for device to complete fetch (3x5s retry pattern)
-        max_retries = 3
-        retry_delay = 5
+        # Quick single check - feature is experimental, don't block long
+        time.sleep(2)
 
-        for attempt in range(max_retries):
-            time.sleep(retry_delay)
+        # Check command status
+        cmd_result = supabase.table('data_fetch_commands').select('status').eq('request_id', request_id).execute()
 
-            # Check command status
-            cmd_result = supabase.table('data_fetch_commands').select('status').eq('request_id', request_id).execute()
+        if cmd_result.data and cmd_result.data[0]['status'] == 'completed':
+            # Device completed - read episode cache
+            print(f"  ✓ Device completed fetch, reading episode cache...")
+            cache_result = supabase.table('episode_cache').select('episodes').eq('device_id', device_id).eq('show_title', show_title).execute()
 
-            if cmd_result.data and cmd_result.data[0]['status'] == 'completed':
-                # Device completed - read episode cache
-                print(f"  ✓ Device completed fetch, reading episode cache...")
-                cache_result = supabase.table('episode_cache').select('episodes').eq('device_id', device_id).eq('show_title', show_title).execute()
+            if cache_result.data:
+                episodes = cache_result.data[0]['episodes']
+                print(f"  ✓ Retrieved {len(episodes)} episodes for {show_title}")
+                return {"episodes": episodes, "show_title": show_title}
+            else:
+                return {"error": f"No episode data found for {show_title}"}
 
-                if cache_result.data:
-                    episodes = cache_result.data[0]['episodes']
-                    print(f"  ✓ Retrieved {len(episodes)} episodes for {show_title}")
-                    return {"episodes": episodes, "show_title": show_title}
-                else:
-                    return {"error": f"No episode data found for {show_title}"}
-
-            if attempt < max_retries - 1:
-                print(f"  → Waiting for device response... retry {attempt + 2}/{max_retries}")
-
-        # Timeout
-        print(f"  ✗ Device did not respond in time")
-        return {"error": "Request timed out - device may be offline or busy"}
+        # Not ready - fail fast
+        print(f"  ✗ Device did not respond quickly enough")
+        return {"error": "Episode data not available - device may be offline or feature not yet supported"}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -3106,33 +3100,25 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
     """Get list of all TV shows in the library from Supabase cache"""
     print(f"🔧 TOOL CALLED: get_all_shows (device: {device_id[:8]}...)")
     try:
-        # Retry up to 3 times if sync is in progress
-        max_retries = 3
-        retry_delay = 5  # seconds
+        # Read from Supabase library_cache
+        result = supabase.table('library_cache').select('shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        for attempt in range(max_retries):
-            # Read from Supabase library_cache
+        if not result.data:
+            print("  → No cache found - library not synced yet")
+            return {"error": "Library not synced yet. Please sync your library first."}
+
+        cache = result.data[0]
+
+        # Check if sync is in progress - one quick retry
+        if cache.get('is_syncing'):
+            print("  → Sync in progress, waiting 2s...")
+            time.sleep(2)
             result = supabase.table('library_cache').select('shows, synced_at, is_syncing').eq('device_id', device_id).execute()
+            cache = result.data[0] if result.data else cache
 
-            if not result.data:
-                print("  → No cache found - library may be syncing for first time")
-                if attempt < max_retries - 1:
-                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                return {"error": "Library not synced yet. Please try again later."}
-
-            cache = result.data[0]
-
-            # Check if sync is in progress
             if cache.get('is_syncing'):
-                if attempt < max_retries - 1:
-                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    print("  ✗ Sync still in progress after 3 retries")
-                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
+                print("  ✗ Sync still in progress")
+                return {"error": "Library sync in progress. Please try again in a moment."}
 
             # Sync complete - return shows
             synced_at = datetime.fromisoformat(cache['synced_at'])
@@ -3165,56 +3151,48 @@ def get_library_stats(device_id: str) -> Dict[str, Any]:
     print(f"🔧 TOOL CALLED: get_library_stats (device: {device_id[:8]}...)")
 
     try:
-        # Retry up to 3 times if sync is in progress
-        max_retries = 3
-        retry_delay = 5  # seconds
+        # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+        result = supabase.table('library_cache').select('movies, shows, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        for attempt in range(max_retries):
-            # Read from Supabase library_cache - ZERO-KNOWLEDGE!
+        if not result.data:
+            print("  → No cache found - library not synced yet")
+            return {"error": "Library not synced yet. Please sync your library first."}
+
+        cache = result.data[0]
+
+        # Check if sync is in progress - one quick retry
+        if cache.get('is_syncing'):
+            print("  → Sync in progress, waiting 2s...")
+            time.sleep(2)
             result = supabase.table('library_cache').select('movies, shows, synced_at, is_syncing').eq('device_id', device_id).execute()
+            cache = result.data[0] if result.data else cache
 
-            if not result.data:
-                print("  → No cache found - library may be syncing for first time")
-                if attempt < max_retries - 1:
-                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                return {"error": "Library not synced yet. Please try again later."}
-
-            cache = result.data[0]
-
-            # Check if sync is in progress
             if cache.get('is_syncing'):
-                if attempt < max_retries - 1:
-                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    print("  ✗ Sync still in progress after 3 retries")
-                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
+                print("  ✗ Sync still in progress")
+                return {"error": "Library sync in progress. Please try again in a moment."}
 
-            # Sync complete - return stats
-            synced_at = datetime.fromisoformat(cache['synced_at'])
-            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+        # Sync complete - return stats
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
-            # Check if cache is stale (> 24 hours)
-            if age_hours > 24:
-                print(f"  ⚠️  Cache is {age_hours:.1f} hours old - requesting refresh")
-                stats = {
-                    "movies": len(cache.get('movies', [])),
-                    "shows": len(cache.get('shows', [])),
-                    "cache_age_hours": round(age_hours, 1),
-                    "requires_sync": True
-                }
-                return stats
-
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  ⚠️  Cache is {age_hours:.1f} hours old - requesting refresh")
             stats = {
                 "movies": len(cache.get('movies', [])),
                 "shows": len(cache.get('shows', [])),
-                "cache_age_hours": round(age_hours, 1)
+                "cache_age_hours": round(age_hours, 1),
+                "requires_sync": True
             }
-            print(f"  ✓ {stats['movies']} movies, {stats['shows']} shows (cache age: {age_hours:.1f}h)")
             return stats
+
+        stats = {
+            "movies": len(cache.get('movies', [])),
+            "shows": len(cache.get('shows', [])),
+            "cache_age_hours": round(age_hours, 1)
+        }
+        print(f"  ✓ {stats['movies']} movies, {stats['shows']} shows (cache age: {age_hours:.1f}h)")
+        return stats
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -3227,54 +3205,46 @@ def get_all_movies(device_id: str) -> Dict[str, Any]:
     """Get list of all movies in the library from Supabase cache"""
     print(f"🔧 TOOL CALLED: get_all_movies (device: {device_id[:8]}...)")
     try:
-        # Retry up to 3 times if sync is in progress
-        max_retries = 3
-        retry_delay = 5  # seconds
+        # Read from Supabase library_cache
+        result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
 
-        for attempt in range(max_retries):
-            # Read from Supabase library_cache
+        if not result.data:
+            print("  → No cache found - library not synced yet")
+            return {"error": "Library not synced yet. Please sync your library first."}
+
+        cache = result.data[0]
+
+        # Check if sync is in progress - one quick retry
+        if cache.get('is_syncing'):
+            print("  → Sync in progress, waiting 2s...")
+            time.sleep(2)
             result = supabase.table('library_cache').select('movies, synced_at, is_syncing').eq('device_id', device_id).execute()
+            cache = result.data[0] if result.data else cache
 
-            if not result.data:
-                print("  → No cache found - library may be syncing for first time")
-                if attempt < max_retries - 1:
-                    print(f"  → Waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                return {"error": "Library not synced yet. Please try again later."}
-
-            cache = result.data[0]
-
-            # Check if sync is in progress
             if cache.get('is_syncing'):
-                if attempt < max_retries - 1:
-                    print(f"  → Sync in progress, waiting {retry_delay}s before retry {attempt + 2}/{max_retries}...")
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    print("  ✗ Sync still in progress after 3 retries")
-                    return {"error": "Library sync is taking longer than expected. Please try again in a moment."}
+                print("  ✗ Sync still in progress")
+                return {"error": "Library sync in progress. Please try again in a moment."}
 
-            # Sync complete - return movies
-            synced_at = datetime.fromisoformat(cache['synced_at'])
-            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+        # Sync complete - return movies
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
-            # Check if cache is stale (> 24 hours)
-            if age_hours > 24:
-                print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
-                return {
-                    "error": "Library cache is stale. Syncing...",
-                    "requires_sync": True
-                }
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+            return {
+                "error": "Library cache is stale. Syncing...",
+                "requires_sync": True
+            }
 
-            movies = cache.get('movies', [])
-            sample_count = min(len(movies), 20)
-            if sample_count:
-                print(f"  ✓ Retrieved {len(movies)} movies from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
-            else:
-                print("  ✓ Retrieved 0 movies from cache")
+        movies = cache.get('movies', [])
+        sample_count = min(len(movies), 20)
+        if sample_count:
+            print(f"  ✓ Retrieved {len(movies)} movies from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
+        else:
+            print("  ✓ Retrieved 0 movies from cache")
 
-            return {"movies": movies, "total": len(movies)}
+        return {"movies": movies, "total": len(movies)}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")
@@ -4559,7 +4529,7 @@ async def chat(
                     detail=f"Agent timed out after {AGENT_TIMEOUT_SECONDS} seconds"
                 )
 
-            response = openai_client.responses.create(
+            response = await async_openai_client.responses.create(
                 model="gpt-5-mini",
                 instructions=UNIFIED_PROMPT,
                 input=input_messages,

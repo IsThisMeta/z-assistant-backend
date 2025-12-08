@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException, Header, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, validator
 from openai import OpenAI, AsyncOpenAI
 import httpx
@@ -4629,6 +4629,231 @@ async def chat(
     except Exception as e:
         logger.error(f"❌ Chat error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
+
+
+# ====== STREAMING CHAT ENDPOINT ======
+
+def sse_event(event_type: str, data: dict) -> str:
+    """Format a Server-Sent Event."""
+    return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+
+def get_tool_description(tool_name: str, args: dict) -> str:
+    """Get a user-friendly description of a tool call."""
+    descriptions = {
+        "search_movies": f"Searching for '{args.get('query', 'movies')}'...",
+        "search_shows": f"Searching for '{args.get('query', 'shows')}'...",
+        "search_person": f"Looking up '{args.get('query', 'person')}'...",
+        "get_person_credits": "Fetching filmography...",
+        "get_all_movies": "Checking your movie library...",
+        "get_all_shows": "Checking your TV library...",
+        "get_library_stats": "Analyzing your library...",
+        "search_movies_in_library": f"Searching your library for '{args.get('query', '')}'...",
+        "get_watch_history_stats": "Analyzing your watch history...",
+        "get_recently_watched": "Checking what you've watched recently...",
+        "get_viewing_patterns": "Analyzing your viewing patterns...",
+        "add_to_stage": "Preparing recommendations...",
+        "add_instantly": "Adding to your queue...",
+    }
+    return descriptions.get(tool_name, f"Running {tool_name}...")
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Streaming chat endpoint - sends SSE events for real-time status updates."""
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    # Check rate limit before streaming
+    try:
+        await check_rate_limit(device_id, rc_customer_id)
+    except RateLimitReached as rl:
+        rate_limit_info = {"detail": rl.detail}
+        if rl.retry_after is not None:
+            rate_limit_info["retry_after_seconds"] = rl.retry_after
+        if rl.tier:
+            rate_limit_info["tier"] = rl.tier
+        return JSONResponse(
+            status_code=200,
+            content={
+                "response": "Rate Limit Reached",
+                "rate_limited": True,
+                "rate_limit": rate_limit_info
+            }
+        )
+
+    async def generate_events():
+        """Async generator that yields SSE events."""
+        try:
+            yield sse_event("status", {"message": "Starting..."})
+
+            input_messages: List[Dict[str, str]] = []
+
+            if request.history:
+                trimmed_history = request.history[-MAX_CHAT_HISTORY_MESSAGES:]
+                for entry in trimmed_history:
+                    role = (entry.get("role") or "").lower()
+                    content = (entry.get("content") or "").strip()
+                    if role not in ("user", "assistant"):
+                        continue
+                    if not content:
+                        continue
+                    input_messages.append({"role": role, "content": content})
+
+            input_messages.append({"role": "user", "content": request.message.strip()})
+            tools = get_unified_tools()
+            max_iterations = 25
+            iteration = 0
+            pending_commands = []
+            stage_id = None
+            operation_type = None
+            agent_start_time = time.time()
+
+            yield sse_event("status", {"message": "Thinking..."})
+
+            while iteration < max_iterations:
+                iteration += 1
+                print(f"\n🔄 Iteration {iteration}")
+
+                if time.time() - agent_start_time > AGENT_TIMEOUT_SECONDS:
+                    yield sse_event("error", {"message": "Request timed out"})
+                    return
+
+                response = await async_openai_client.responses.create(
+                    model="gpt-5-mini",
+                    instructions=UNIFIED_PROMPT,
+                    input=input_messages,
+                    tools=tools,
+                )
+
+                has_function_calls = False
+                for item in response.output:
+                    if item.type == "function_call":
+                        has_function_calls = True
+                        function_name = item.name
+                        arguments = json.loads(item.arguments)
+                        call_id = item.call_id
+
+                        # Send tool_call event with user-friendly description
+                        description = get_tool_description(function_name, arguments)
+                        yield sse_event("tool_call", {
+                            "tool": function_name,
+                            "message": description
+                        })
+
+                        print(f"  🔧 {function_name}({arguments})")
+                        result = await execute_function(function_name, arguments, device_id)
+
+                        # Send tool_result event with context-aware messaging
+                        result_summary = ""
+                        if isinstance(result, dict):
+                            if function_name == "get_all_movies":
+                                count = len(result.get("movies", []))
+                                result_summary = f"Scanned {count} library items"
+                            elif function_name == "get_all_shows":
+                                count = len(result.get("shows", []))
+                                result_summary = f"Scanned {count} library items"
+                            elif function_name == "search_movies":
+                                count = len(result.get("movies", []))
+                                result_summary = f"Found {count} match{'es' if count != 1 else ''}" if count > 0 else "No matches found"
+                            elif function_name == "search_shows":
+                                count = len(result.get("shows", []))
+                                result_summary = f"Found {count} match{'es' if count != 1 else ''}" if count > 0 else "No matches found"
+                            elif function_name == "search_person":
+                                count = len(result.get("people", []))
+                                result_summary = f"Found {count} {'people' if count != 1 else 'person'}" if count > 0 else "No one found"
+                            elif function_name == "get_library_stats":
+                                movies = result.get("movies", 0)
+                                shows = result.get("shows", 0)
+                                result_summary = f"Library: {movies} movies, {shows} shows"
+                            elif "stage_id" in result:
+                                result_summary = "Ready to add to your library"
+                            elif "error" in result:
+                                result_summary = result.get("error", "")[:50]
+
+                        if result_summary:
+                            yield sse_event("tool_result", {
+                                "tool": function_name,
+                                "message": result_summary
+                            })
+
+                        # Track stage_id and operation
+                        if isinstance(result, dict) and result.get('stage_id'):
+                            stage_id = result.get('stage_id')
+                            if result.get('operation'):
+                                operation_type = result.get('operation')
+                            yield sse_event("staging", {
+                                "message": "Staging results...",
+                                "operation": operation_type
+                            })
+
+                        if isinstance(result, dict) and result.get('requires_sync'):
+                            pending_commands.append({
+                                "action": "sync_library",
+                                "services": ["radarr", "sonarr"]
+                            })
+
+                        input_messages.append({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": function_name,
+                            "arguments": item.arguments
+                        })
+                        input_messages.append({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": json.dumps(result)
+                        })
+
+                if not has_function_calls:
+                    output_text = ""
+                    for item in response.output:
+                        if item.type == "message":
+                            for content in item.content:
+                                if hasattr(content, 'text'):
+                                    output_text = content.text
+                                    break
+                            break
+
+                    # Build final response
+                    response_data = {"response": output_text}
+
+                    if len(output_text) == 36 and output_text.count('-') == 4:
+                        response_data["stage_id"] = output_text
+                        response_data["staged"] = True
+                        if operation_type:
+                            response_data["operation"] = operation_type
+
+                    if stage_id:
+                        response_data["staged"] = True
+                        response_data["stage_id"] = stage_id
+                        if operation_type:
+                            response_data["operation"] = operation_type
+
+                    if pending_commands:
+                        response_data["commands"] = pending_commands
+
+                    yield sse_event("complete", response_data)
+                    return
+
+            yield sse_event("error", {"message": "Too many iterations"})
+
+        except Exception as e:
+            logger.error(f"❌ Stream error: {e}", exc_info=True)
+            yield sse_event("error", {"message": str(e)})
+
+    return StreamingResponse(
+        generate_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        }
+    )
+
 
 @app.post("/deep-cuts/generate")
 async def generate_deep_cuts_endpoint(

@@ -3120,26 +3120,26 @@ def get_all_shows(device_id: str) -> Dict[str, Any]:
                 print("  ✗ Sync still in progress")
                 return {"error": "Library sync in progress. Please try again in a moment."}
 
-            # Sync complete - return shows
-            synced_at = datetime.fromisoformat(cache['synced_at'])
-            age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
+        # Sync complete - return shows
+        synced_at = datetime.fromisoformat(cache['synced_at'])
+        age_hours = (datetime.now(synced_at.tzinfo) - synced_at).total_seconds() / 3600
 
-            # Check if cache is stale (> 24 hours)
-            if age_hours > 24:
-                print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
-                return {
-                    "error": "Library cache is stale. Syncing...",
-                    "requires_sync": True
-                }
+        # Check if cache is stale (> 24 hours)
+        if age_hours > 24:
+            print(f"  → Cache is {age_hours:.1f}h old - requesting refresh")
+            return {
+                "error": "Library cache is stale. Syncing...",
+                "requires_sync": True
+            }
 
-            shows = cache.get('shows', [])
-            sample_count = min(len(shows), 10)
-            if sample_count:
-                print(f"  ✓ Retrieved {len(shows)} shows from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
-            else:
-                print("  ✓ Retrieved 0 shows from cache")
+        shows = cache.get('shows', [])
+        sample_count = min(len(shows), 10)
+        if sample_count:
+            print(f"  ✓ Retrieved {len(shows)} shows from cache (showing first {sample_count} in logs, synced {age_hours:.1f}h ago)")
+        else:
+            print("  ✓ Retrieved 0 shows from cache")
 
-            return {"shows": shows, "total": len(shows)}
+        return {"shows": shows, "total": len(shows)}
 
     except Exception as e:
         print(f"  ✗ Error: {e}")

@@ -455,6 +455,17 @@ async def verify_device_subscription(x_device_id: str = Header(None)) -> tuple[s
         logger.error(f"Device auth error: {e}")
         raise HTTPException(status_code=401, detail="Device authentication failed")
 
+def get_device_instance_key(device_id: str) -> Optional[str]:
+    """Best-effort fetch of a device's instance_key from Supabase."""
+    try:
+        result = supabase.table('device_keys').select('instance_key').eq('device_id', device_id).execute()
+        if result.data:
+            value = result.data[0].get('instance_key')
+            return value if isinstance(value, str) and value.strip() else None
+    except Exception as e:
+        logger.warning(f"Could not fetch instance_key from device_keys for {device_id[:8]}...: {e}")
+    return None
+
 def decrypt_credentials(encrypted_data: dict, hmac_key: str) -> dict:
     """Decrypt HMAC-protected credentials"""
     decrypted = {}
@@ -1090,7 +1101,7 @@ The obscurity_score (1-10) indicates how "deep cut" it is:
 
 Base your recommendations on their watch history patterns and library genres."""
 
-async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra", instance_key: str = None) -> Dict[str, Any]:
     """Generate AI-powered hidden gem movie recommendations for Mega/Ultra users.
 
     This is a separate AI function (not part of the chat system) that runs weekly.
@@ -1099,6 +1110,7 @@ async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -
     Args:
         device_id: Device identifier
         subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5)
+        instance_key: Instance key for the radarr/sonarr instance
     """
 
     print(f"\n🎬 DEEP CUTS GENERATION STARTED for device {device_id[:8]}...")
@@ -1107,10 +1119,14 @@ async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -
 
     try:
         # Check if generation is already in progress
-        existing = supabase.table('deep_cuts_cache').select('is_generating, next_generation_at, generated_at').eq('device_id', device_id).execute()
+        existing = supabase.table('deep_cuts_cache').select(
+            'is_generating, next_generation_at, generated_at, instance_key'
+        ).eq('device_id', device_id).execute()
 
         if existing.data:
             cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
 
             # Don't regenerate if already running
             if cache.get('is_generating'):
@@ -1126,9 +1142,13 @@ async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -
                     print(f"  ℹ️  Hidden gems generated {age_days:.1f} days ago - no regeneration needed")
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
+        if not instance_key or not str(instance_key).strip():
+            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+
         # Mark as generating
         supabase.table('deep_cuts_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
@@ -1138,10 +1158,9 @@ async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra") -
 
         if not library_result.data:
             print("  ❌ No library cache found")
-            supabase.table('deep_cuts_cache').upsert({
-                'device_id': device_id,
+            supabase.table('deep_cuts_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
             return {"error": "Library not synced. Please sync your library first."}
 
         library = library_result.data[0]
@@ -1286,6 +1305,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         next_gen = datetime.now() + timedelta(days=7)
         supabase.table('deep_cuts_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'recommendations': enriched_recs,
             'generated_at': datetime.now().isoformat(),
             'is_generating': False,
@@ -1312,10 +1332,9 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
 
         # Clear is_generating flag on error
         try:
-            supabase.table('deep_cuts_cache').upsert({
-                'device_id': device_id,
+            supabase.table('deep_cuts_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
         except:
             pass
 
@@ -1808,7 +1827,11 @@ OUTPUT FORMAT (JSON):
 BE CREATIVE. Focus on 1-3 people max. Make it feel like exploring their TV career!"""
 
 
-async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies(
+    device_id: str,
+    subscription_tier: str = "ultra",
+    instance_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬✨ MAGIC MOVIES GENERATION STARTED for device {device_id[:8]}...")
@@ -1817,11 +1840,15 @@ async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra"
 
     try:
         # Check if generation is already in progress
-        existing = supabase.table('magic_movies_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+        existing = supabase.table('magic_movies_cache').select(
+            'is_generating, next_generation_at, generated_at, history, instance_key'
+        ).eq('device_id', device_id).execute()
 
         cache = {}
         if existing.data:
             cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
 
             if cache.get('is_generating'):
                 print("  ⏭️  Generation already in progress")
@@ -1836,9 +1863,21 @@ async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra"
                     print(f"  ℹ️  Magic Movies generated {age_days:.1f} days ago - no regeneration needed")
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
+        if isinstance(instance_key, str):
+            instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = cache.get('instance_key')
+            if isinstance(instance_key, str):
+                instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = get_device_instance_key(device_id)
+        if not instance_key:
+            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+
         # Mark as generating with non-null defaults to satisfy NOT NULL constraints
         supabase.table('magic_movies_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': cache.get('section_title') or "Magic Movies",
             'section_theme': cache.get('section_theme') or "",
             'recommendations': cache.get('recommendations') or [],
@@ -1851,14 +1890,9 @@ async def generate_magic_movies(device_id: str, subscription_tier: str = "ultra"
         library_result = supabase.table('library_cache').select('movies').eq('device_id', device_id).execute()
 
         if not library_result.data:
-            supabase.table('magic_movies_cache').upsert({
-                'device_id': device_id,
-                'section_title': cache.get('section_title') or "Magic Movies",
-                'section_theme': cache.get('section_theme') or "",
-                'recommendations': cache.get('recommendations') or [],
-                'history': cache.get('history') or [],
+            supabase.table('magic_movies_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
             return {"error": "Library not synced. Please sync your library first."}
 
         library = library_result.data[0]
@@ -2023,6 +2057,7 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
 
         supabase.table('magic_movies_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': section_title,
             'section_theme': section_theme,
             'recommendations': enriched_recs,
@@ -2049,32 +2084,34 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         import traceback
         traceback.print_exc()
         try:
-            fallback_cache = cache if 'cache' in locals() else {}
-            supabase.table('magic_movies_cache').upsert({
-                'device_id': device_id,
-                'section_title': fallback_cache.get('section_title') or "Magic Movies",
-                'section_theme': fallback_cache.get('section_theme') or "",
-                'recommendations': fallback_cache.get('recommendations') or [],
-                'history': fallback_cache.get('history') or [],
+            supabase.table('magic_movies_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
         except:
             pass
         return {"error": str(e)}
 
 
-async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_movies_cast_crew(
+    device_id: str,
+    subscription_tier: str = "ultra",
+    instance_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED movie recommendations with 8-week history tracking."""
 
     print(f"\n🎬👥 MAGIC MOVIES CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
     start_time = time.time()
 
     try:
-        existing = supabase.table('magic_movies_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+        existing = supabase.table('magic_movies_cast_crew_cache').select(
+            'is_generating, next_generation_at, generated_at, history, instance_key'
+        ).eq('device_id', device_id).execute()
 
         cache = {}
         if existing.data:
             cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
@@ -2084,8 +2121,20 @@ async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str
                 if age_days < 7:
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
+        if isinstance(instance_key, str):
+            instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = cache.get('instance_key')
+            if isinstance(instance_key, str):
+                instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = get_device_instance_key(device_id)
+        if not instance_key:
+            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+
         supabase.table('magic_movies_cast_crew_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': cache.get('section_title') or "Magic Cast & Crew",
             'featured_people': cache.get('featured_people') or [],
             'recommendations': cache.get('recommendations') or [],
@@ -2106,14 +2155,9 @@ async def generate_magic_movies_cast_crew(device_id: str, subscription_tier: str
             people_result = _Empty()
 
         if not library_result.data:
-            supabase.table('magic_movies_cast_crew_cache').upsert({
-                'device_id': device_id,
-                'section_title': cache.get('section_title') or "Magic Cast & Crew",
-                'featured_people': cache.get('featured_people') or [],
-                'recommendations': cache.get('recommendations') or [],
-                'history': cache.get('history') or [],
+            supabase.table('magic_movies_cast_crew_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
             return {"error": "Library not synced."}
 
         movies_in_library = library_result.data[0].get('movies', [])
@@ -2274,6 +2318,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
 
         supabase.table('magic_movies_cast_crew_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': section_title,
             'featured_people': featured_people,
             'recommendations': enriched_recs,
@@ -2300,32 +2345,34 @@ Pick 1-3 key people and create a themed section around their filmography."""
         import traceback
         traceback.print_exc()
         try:
-            fallback_cache = cache if 'cache' in locals() else {}
-            supabase.table('magic_movies_cast_crew_cache').upsert({
-                'device_id': device_id,
-                'section_title': fallback_cache.get('section_title') or "Magic Cast & Crew",
-                'featured_people': fallback_cache.get('featured_people') or [],
-                'recommendations': fallback_cache.get('recommendations') or [],
-                'history': fallback_cache.get('history') or [],
+            supabase.table('magic_movies_cast_crew_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
         except:
             pass
         return {"error": str(e)}
 
 
-async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows(
+    device_id: str,
+    subscription_tier: str = "ultra",
+    instance_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Generate AI-powered DYNAMIC themed TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺✨ MAGIC SHOWS GENERATION STARTED for device {device_id[:8]}...")
     start_time = time.time()
 
     try:
-        existing = supabase.table('magic_shows_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+        existing = supabase.table('magic_shows_cache').select(
+            'is_generating, next_generation_at, generated_at, history, instance_key'
+        ).eq('device_id', device_id).execute()
 
         cache = {}
         if existing.data:
             cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
@@ -2335,8 +2382,20 @@ async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra")
                 if age_days < 7:
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
+        if isinstance(instance_key, str):
+            instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = cache.get('instance_key')
+            if isinstance(instance_key, str):
+                instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = get_device_instance_key(device_id)
+        if not instance_key:
+            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+
         supabase.table('magic_shows_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': cache.get('section_title') or "Magic Shows",
             'section_theme': cache.get('section_theme') or "",
             'recommendations': cache.get('recommendations') or [],
@@ -2348,14 +2407,9 @@ async def generate_magic_shows(device_id: str, subscription_tier: str = "ultra")
         library_result = supabase.table('library_cache').select('shows').eq('device_id', device_id).execute()
 
         if not library_result.data:
-            supabase.table('magic_shows_cache').upsert({
-                'device_id': device_id,
-                'section_title': cache.get('section_title') or "Magic Shows",
-                'section_theme': cache.get('section_theme') or "",
-                'recommendations': cache.get('recommendations') or [],
-                'history': cache.get('history') or [],
+            supabase.table('magic_shows_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
             return {"error": "Library not synced."}
 
         shows_in_library = library_result.data[0].get('shows', [])
@@ -2495,6 +2549,7 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
 
         supabase.table('magic_shows_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': section_title,
             'section_theme': section_theme,
             'recommendations': enriched_recs,
@@ -2520,32 +2575,34 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         import traceback
         traceback.print_exc()
         try:
-            fallback_cache = cache if 'cache' in locals() else {}
-            supabase.table('magic_shows_cache').upsert({
-                'device_id': device_id,
-                'section_title': fallback_cache.get('section_title') or "Magic Shows",
-                'section_theme': fallback_cache.get('section_theme') or "",
-                'recommendations': fallback_cache.get('recommendations') or [],
-                'history': fallback_cache.get('history') or [],
+            supabase.table('magic_shows_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
         except:
             pass
         return {"error": str(e)}
 
 
-async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_shows_cast_crew(
+    device_id: str,
+    subscription_tier: str = "ultra",
+    instance_key: Optional[str] = None,
+) -> Dict[str, Any]:
     """Generate AI-powered PEOPLE-BASED TV show recommendations with 8-week history tracking."""
 
     print(f"\n📺👥 MAGIC SHOWS CAST & CREW GENERATION STARTED for device {device_id[:8]}...")
     start_time = time.time()
 
     try:
-        existing = supabase.table('magic_shows_cast_crew_cache').select('is_generating, next_generation_at, generated_at, history').eq('device_id', device_id).execute()
+        existing = supabase.table('magic_shows_cast_crew_cache').select(
+            'is_generating, next_generation_at, generated_at, history, instance_key'
+        ).eq('device_id', device_id).execute()
 
         cache = {}
         if existing.data:
             cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
@@ -2555,8 +2612,20 @@ async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str 
                 if age_days < 7:
                     return {"status": "up_to_date", "age_days": round(age_days, 1)}
 
+        if isinstance(instance_key, str):
+            instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = cache.get('instance_key')
+            if isinstance(instance_key, str):
+                instance_key = instance_key.strip()
+        if not instance_key:
+            instance_key = get_device_instance_key(device_id)
+        if not instance_key:
+            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+
         supabase.table('magic_shows_cast_crew_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': cache.get('section_title') or "Magic Cast & Crew",
             'featured_people': cache.get('featured_people') or [],
             'recommendations': cache.get('recommendations') or [],
@@ -2576,14 +2645,9 @@ async def generate_magic_shows_cast_crew(device_id: str, subscription_tier: str 
             people_result = _Empty()
 
         if not library_result.data:
-            supabase.table('magic_shows_cast_crew_cache').upsert({
-                'device_id': device_id,
-                'section_title': cache.get('section_title') or "Magic Cast & Crew",
-                'featured_people': cache.get('featured_people') or [],
-                'recommendations': cache.get('recommendations') or [],
-                'history': cache.get('history') or [],
+            supabase.table('magic_shows_cast_crew_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
             return {"error": "Library not synced."}
 
         shows_in_library = library_result.data[0].get('shows', [])
@@ -2743,6 +2807,7 @@ Pick 1-3 key people and create a themed section around their TV work."""
 
         supabase.table('magic_shows_cast_crew_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': section_title,
             'featured_people': featured_people,
             'recommendations': enriched_recs,
@@ -2769,15 +2834,9 @@ Pick 1-3 key people and create a themed section around their TV work."""
         import traceback
         traceback.print_exc()
         try:
-            fallback_cache = cache if 'cache' in locals() else {}
-            supabase.table('magic_shows_cast_crew_cache').upsert({
-                'device_id': device_id,
-                'section_title': fallback_cache.get('section_title') or "Magic Cast & Crew",
-                'featured_people': fallback_cache.get('featured_people') or [],
-                'recommendations': fallback_cache.get('recommendations') or [],
-                'history': fallback_cache.get('history') or [],
+            supabase.table('magic_shows_cast_crew_cache').update({
                 'is_generating': False
-            }, on_conflict='device_id').execute()
+            }).eq('device_id', device_id).execute()
         except:
             pass
         return {"error": str(e)}
@@ -2838,36 +2897,48 @@ The match_score (1-10) indicates relevance to user's library:
 Focus on DISCOVERABLE people - those whose work they'd genuinely enjoy exploring!"""
 
 
-async def generate_magic_people(device_id: str, subscription_tier: str = "ultra") -> Dict[str, Any]:
+async def generate_magic_people(device_id: str, subscription_tier: str = "ultra", instance_key: str = None) -> Dict[str, Any]:
     """Generate AI-powered person recommendations for Mega/Ultra users.
-    
+
     Analyzes library + watch history to recommend actors, directors, cinematographers, etc.
+
+    Args:
+        device_id: Device identifier
+        subscription_tier: "mega" (uses gpt-5-mini) or "ultra" (uses gpt-5)
+        instance_key: Instance key for the profile/instance
     """
-    
+
     print(f"\n👥✨ MAGIC PEOPLE GENERATION STARTED for device {device_id[:8]}...")
     print(f"  → Subscription tier: {subscription_tier.upper()}")
     start_time = time.time()
-    
+
     try:
         # Check existing cache
         existing = supabase.table('magic_people_cache').select('*').eq('device_id', device_id).execute()
         cache = existing.data[0] if existing.data else {}
         history = cache.get('history') or []
-        
+
+        if not instance_key:
+            instance_key = cache.get('instance_key', 'default')
+
         if cache.get('is_generating'):
             print("  ⏭️  Generation already in progress")
             return {"error": "Generation already in progress. Please wait."}
-        
+
         if cache.get('generated_at'):
             last_gen = datetime.fromisoformat(cache['generated_at'])
             age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
             if age_days < 7:
                 print(f"  ℹ️  Magic People generated {age_days:.1f} days ago - no regeneration needed")
                 return {"status": "up_to_date", "age_days": round(age_days, 1)}
-        
+
+        if not instance_key or not str(instance_key).strip():
+            instance_key = 'default'
+
         # Mark as generating
         supabase.table('magic_people_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'is_generating': True,
             'generation_started_at': datetime.now().isoformat()
         }, on_conflict='device_id').execute()
@@ -2880,6 +2951,7 @@ async def generate_magic_people(device_id: str, subscription_tier: str = "ultra"
             print("  ❌ No library cache found")
             supabase.table('magic_people_cache').upsert({
                 'device_id': device_id,
+                'instance_key': instance_key,
                 'is_generating': False
             }, on_conflict='device_id').execute()
             return {"error": "Library not synced. Please sync your library first."}
@@ -3014,6 +3086,7 @@ Based on this profile, recommend 12-15 people (actors, directors, cinematographe
         
         supabase.table('magic_people_cache').upsert({
             'device_id': device_id,
+            'instance_key': instance_key,
             'section_title': section_title,
             'section_theme': section_theme,
             'recommendations': enriched_recs,
@@ -3040,8 +3113,10 @@ Based on this profile, recommend 12-15 people (actors, directors, cinematographe
         import traceback
         traceback.print_exc()
         try:
+            # Reset is_generating flag so user can retry
             supabase.table('magic_people_cache').upsert({
                 'device_id': device_id,
+                'instance_key': instance_key or 'default',
                 'is_generating': False
             }, on_conflict='device_id').execute()
         except:
@@ -4858,7 +4933,8 @@ async def chat_stream(
 @app.post("/deep-cuts/generate")
 async def generate_deep_cuts_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None)
 ):
     """Generate AI-powered deep cuts recommendations for Mega/Ultra users.
 
@@ -4867,19 +4943,28 @@ async def generate_deep_cuts_endpoint(
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
         print(f"🎬 Deep Cuts generation requested for device {device_id[:8]}...")
         print(f"  → Tier: {subscription_tier.upper()}")
+        if instance_key:
+            print(f"  → Instance key: {instance_key[:8]}...")
+        else:
+            print("  → Instance key: (missing)")
 
         # Generate deep cuts (function handles rate limiting internally)
-        result = await generate_deep_cuts(device_id, subscription_tier)
+        result = await generate_deep_cuts(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             # Return appropriate status code based on error
             if "already in progress" in result["error"].lower():
                 raise HTTPException(status_code=409, detail=result["error"])
             elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
                 raise HTTPException(status_code=400, detail=result["error"])
             else:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -4998,20 +5083,26 @@ async def get_up_next(
 @app.post("/recommendations/magic-movies/generate")
 async def generate_magic_movies_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None),
 ):
     """Generate AI-powered DYNAMIC themed movie recommendations for Mega/Ultra users."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
-        result = await generate_magic_movies(device_id, subscription_tier)
+        result = await generate_magic_movies(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
                 raise HTTPException(status_code=409, detail=result["error"])
             elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
                 raise HTTPException(status_code=400, detail=result["error"])
             else:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -5079,20 +5170,26 @@ async def get_magic_movies(
 @app.post("/recommendations/magic-movies-cast-crew/generate")
 async def generate_magic_movies_cast_crew_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None),
 ):
     """Generate AI-powered PEOPLE-BASED movie recommendations for Mega/Ultra users."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
-        result = await generate_magic_movies_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_movies_cast_crew(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
                 raise HTTPException(status_code=409, detail=result["error"])
             elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
                 raise HTTPException(status_code=400, detail=result["error"])
             else:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -5170,20 +5267,26 @@ async def get_magic_movies_cast_crew(
 @app.post("/recommendations/magic-shows/generate")
 async def generate_magic_shows_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None),
 ):
     """Generate AI-powered DYNAMIC themed show recommendations for Mega/Ultra users."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
-        result = await generate_magic_shows(device_id, subscription_tier)
+        result = await generate_magic_shows(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
                 raise HTTPException(status_code=409, detail=result["error"])
             elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
                 raise HTTPException(status_code=400, detail=result["error"])
             else:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -5251,20 +5354,26 @@ async def get_magic_shows(
 @app.post("/recommendations/magic-shows-cast-crew/generate")
 async def generate_magic_shows_cast_crew_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None),
 ):
     """Generate AI-powered PEOPLE-BASED show recommendations for Mega/Ultra users."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
-        result = await generate_magic_shows_cast_crew(device_id, subscription_tier)
+        result = await generate_magic_shows_cast_crew(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():
                 raise HTTPException(status_code=409, detail=result["error"])
             elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
                 raise HTTPException(status_code=400, detail=result["error"])
             else:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -5342,15 +5451,19 @@ async def get_magic_shows_cast_crew(
 @app.post("/recommendations/magic-people/generate")
 async def generate_magic_people_endpoint(
     device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
-    x_subscription_tier: str = Header(default="ultra")
+    x_subscription_tier: str = Header(default="ultra"),
+    x_instance_key: Optional[str] = Header(default=None)
 ):
     """Generate AI-powered PERSON recommendations for Mega/Ultra users."""
 
     device_id, hmac_key, rc_customer_id = device_auth
     subscription_tier = x_subscription_tier.lower()
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
 
     try:
-        result = await generate_magic_people(device_id, subscription_tier)
+        result = await generate_magic_people(device_id, subscription_tier, instance_key)
 
         if "error" in result:
             if "already in progress" in result["error"].lower():

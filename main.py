@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional, Tuple
 import uuid
 import json
 from datetime import datetime, timedelta, timezone
+import pytz
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from collections import defaultdict
@@ -26,6 +27,38 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+def get_next_sunday_midnight_pt() -> datetime:
+    """
+    Calculate the next Sunday at midnight Pacific Time.
+
+    This creates a fixed weekly schedule for AI recommendations,
+    similar to Spotify's Discover Weekly (every Monday morning).
+
+    Returns:
+        datetime: Next Sunday 00:00:00 PT as a timezone-aware UTC datetime
+    """
+    pacific = pytz.timezone('America/Los_Angeles')
+    now_pt = datetime.now(pacific)
+
+    # Calculate days until next Sunday (Sunday = 6 in weekday())
+    days_until_sunday = (6 - now_pt.weekday()) % 7
+
+    # If today is Sunday but it's already past midnight, go to next Sunday
+    if days_until_sunday == 0 and now_pt.hour > 0:
+        days_until_sunday = 7
+
+    # If days_until_sunday is 0, it means today is Sunday before midnight
+    # Otherwise, add the days to get to next Sunday
+    next_sunday_pt = now_pt + timedelta(days=days_until_sunday)
+
+    # Set to midnight
+    next_sunday_midnight_pt = pacific.localize(
+        datetime(next_sunday_pt.year, next_sunday_pt.month, next_sunday_pt.day, 0, 0, 0)
+    )
+
+    # Convert to UTC for storage
+    return next_sunday_midnight_pt.astimezone(timezone.utc)
 
 class RateLimitReached(Exception):
     """Raised when a device exceeds its allowed request budget."""
@@ -1128,32 +1161,32 @@ async def generate_deep_cuts(device_id: str, subscription_tier: str = "ultra", i
     start_time = time.time()
 
     try:
-        # Check if generation is already in progress
+        # Resolve instance_key early
+        if not instance_key or not str(instance_key).strip():
+            instance_key = get_device_instance_key(device_id) or 'default'
+
+        # Check if generation is already in progress for this specific instance
         existing = supabase.table('deep_cuts_cache').select(
             'is_generating, next_generation_at, generated_at, instance_key'
-        ).eq('device_id', device_id).execute()
+        ).eq('device_id', device_id).eq('instance_key', instance_key).execute()
 
         if existing.data:
             cache = existing.data[0]
-            if not instance_key:
-                instance_key = cache.get('instance_key')
 
             # Don't regenerate if already running
             if cache.get('is_generating'):
                 print("  ⏭️  Generation already in progress")
                 return {"error": "Generation already in progress. Please wait."}
 
-            # Check if we need to regenerate (> 7 days old)
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+            # Check if we need to regenerate (before next Sunday midnight PT)
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
 
-                if age_days < 7:
-                    print(f"  ℹ️  Hidden gems generated {age_days:.1f} days ago - no regeneration needed")
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
-
-        if not instance_key or not str(instance_key).strip():
-            return {"error": "Missing instance key. Send X-Instance-Key header (or ensure device_keys.instance_key is set)."}
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600  # hours
+                    print(f"  ℹ️  Deep Cuts up to date - next refresh in {time_until:.1f} hours")
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         # Mark as generating
         supabase.table('deep_cuts_cache').upsert({
@@ -1312,7 +1345,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         duration_ms = int((time.time() - start_time) * 1000)
 
         # Store in database
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
         supabase.table('deep_cuts_cache').upsert({
             'device_id': device_id,
             'instance_key': instance_key,
@@ -1418,14 +1451,15 @@ async def generate_up_next(device_id: str, subscription_tier: str = "ultra") -> 
                 print("  ⏭️  Generation already in progress")
                 return {"error": "Generation already in progress. Please wait."}
 
-            # Check if we need to regenerate (> 7 days old)
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+            # Check if we need to regenerate (before next Sunday midnight PT)
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
 
-                if age_days < 7:
-                    print(f"  ℹ️  Show recommendations generated {age_days:.1f} days ago - no regeneration needed")
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600  # hours
+                    print(f"  ℹ️  Up Next up to date - next refresh in {time_until:.1f} hours")
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         # Mark as generating
         supabase.table('show_recommendations_cache').upsert({
@@ -1581,7 +1615,7 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
         duration_ms = int((time.time() - start_time) * 1000)
 
         # Store in database
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
         supabase.table('show_recommendations_cache').upsert({
             'device_id': device_id,
             'recommendations': enriched_recs,
@@ -1875,14 +1909,15 @@ async def generate_magic_movies(
                 print("  ⏭️  Generation already in progress")
                 return {"error": "Generation already in progress. Please wait."}
 
-            # Check if we need to regenerate (> 7 days old)
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
+            # Check if we need to regenerate (before next Sunday midnight PT)
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
 
-                if age_days < 7:
-                    print(f"  ℹ️  Magic Movies generated {age_days:.1f} days ago - no regeneration needed")
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600  # hours
+                    print(f"  ℹ️  Magic Movies up to date - next refresh in {time_until:.1f} hours")
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         if isinstance(instance_key, str):
             instance_key = instance_key.strip()
@@ -2074,7 +2109,7 @@ Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in th
         ][:100]  # Cap at 100 items
 
         duration_ms = int((time.time() - start_time) * 1000)
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
 
         supabase.table('magic_movies_cache').upsert({
             'device_id': device_id,
@@ -2138,11 +2173,12 @@ async def generate_magic_movies_cast_crew(
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
-                if age_days < 7:
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         if isinstance(instance_key, str):
             instance_key = instance_key.strip()
@@ -2337,7 +2373,7 @@ Pick 1-3 key people and create a themed section around their filmography."""
         updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
 
         duration_ms = int((time.time() - start_time) * 1000)
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
 
         supabase.table('magic_movies_cast_crew_cache').upsert({
             'device_id': device_id,
@@ -2401,11 +2437,12 @@ async def generate_magic_shows(
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
-                if age_days < 7:
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         if isinstance(instance_key, str):
             instance_key = instance_key.strip()
@@ -2570,7 +2607,7 @@ Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list.
         updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
 
         duration_ms = int((time.time() - start_time) * 1000)
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
 
         supabase.table('magic_shows_cache').upsert({
             'device_id': device_id,
@@ -2633,11 +2670,12 @@ async def generate_magic_shows_cast_crew(
             if cache.get('is_generating'):
                 return {"error": "Generation already in progress. Please wait."}
 
-            if cache.get('generated_at'):
-                last_gen = datetime.fromisoformat(cache['generated_at'])
-                age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
-                if age_days < 7:
-                    return {"status": "up_to_date", "age_days": round(age_days, 1)}
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         if isinstance(instance_key, str):
             instance_key = instance_key.strip()
@@ -2830,7 +2868,7 @@ Pick 1-3 key people and create a themed section around their TV work."""
         updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
 
         duration_ms = int((time.time() - start_time) * 1000)
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
 
         supabase.table('magic_shows_cast_crew_cache').upsert({
             'device_id': device_id,
@@ -2954,12 +2992,13 @@ async def generate_magic_people(device_id: str, subscription_tier: str = "ultra"
             print("  ⏭️  Generation already in progress")
             return {"error": "Generation already in progress. Please wait."}
 
-        if cache.get('generated_at'):
-            last_gen = datetime.fromisoformat(cache['generated_at'])
-            age_days = (datetime.now(last_gen.tzinfo) - last_gen).total_seconds() / 86400
-            if age_days < 7:
-                print(f"  ℹ️  Magic People generated {age_days:.1f} days ago - no regeneration needed")
-                return {"status": "up_to_date", "age_days": round(age_days, 1)}
+        if cache.get('next_generation_at'):
+            next_gen = datetime.fromisoformat(cache['next_generation_at'])
+            now_utc = datetime.now(timezone.utc)
+            if now_utc < next_gen:
+                time_until = (next_gen - now_utc).total_seconds() / 3600
+                print(f"  ℹ️  Magic People up to date - next refresh in {time_until:.1f} hours")
+                return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
 
         if not instance_key or not str(instance_key).strip():
             instance_key = 'default'
@@ -3111,7 +3150,7 @@ Based on this profile, recommend 12-15 people (actors, directors, cinematographe
         updated_history = [item for item in updated_history if datetime.fromisoformat(item['added_at']) > eight_weeks_ago][:100]
         
         duration_ms = int((time.time() - start_time) * 1000)
-        next_gen = datetime.now() + timedelta(days=7)
+        next_gen = get_next_sunday_midnight_pt()
         
         supabase.table('magic_people_cache').upsert({
             'device_id': device_id,
@@ -5008,14 +5047,18 @@ async def generate_deep_cuts_endpoint(
 
 @app.get("/deep-cuts")
 async def get_deep_cuts(
-    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_instance_key: Optional[str] = Header(default=None)
 ):
     """Retrieve cached deep cuts recommendations for a device."""
 
     device_id, hmac_key, rc_customer_id = device_auth
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id) or 'default'
 
     try:
-        result = supabase.table('deep_cuts_cache').select('*').eq('device_id', device_id).execute()
+        result = supabase.table('deep_cuts_cache').select('*').eq('device_id', device_id).eq('instance_key', instance_key).execute()
 
         if not result.data:
             return {

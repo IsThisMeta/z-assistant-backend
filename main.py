@@ -1251,7 +1251,7 @@ Based on this profile, recommend 15-20 hidden gem films they'll love but have ne
         print(f"  → Context length: {len(context)} chars")
 
         # Select model based on subscription tier
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
         print(f"  → Using model: {model}")
 
         # Call OpenAI with Responses API (required for GPT-5)
@@ -1526,7 +1526,7 @@ Based on this profile, recommend 10-15 TV shows they should watch next."""
         print(f"  → Context length: {len(context)} chars")
 
         # Select model based on subscription tier
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
         print(f"  → Using model: {model}")
 
         # Call OpenAI with Responses API
@@ -1991,7 +1991,7 @@ EXCLUDED TITLES (last 8 weeks):
 
 Create a DYNAMIC THEME based on this library and recommend 8-12 movies NOT in their library and NOT in excluded titles."""
 
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
         response = await async_openai_client.responses.create(
             model=model,
@@ -2240,7 +2240,7 @@ EXCLUDED TITLES (last 8 weeks):
 
 Pick 1-3 key people and create a themed section around their filmography."""
 
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
         response = await async_openai_client.responses.create(
             model=model,
@@ -2496,7 +2496,7 @@ EXCLUDED TITLES (last 8 weeks):
 
 Create a DYNAMIC THEME and recommend 8-12 shows NOT in library or excluded list."""
 
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
         response = await async_openai_client.responses.create(
             model=model,
@@ -2735,7 +2735,7 @@ EXCLUDED TITLES (last 8 weeks):
 
 Pick 1-3 key people and create a themed section around their TV work."""
 
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
 
         response = await async_openai_client.responses.create(
             model=model,
@@ -3074,7 +3074,7 @@ EXCLUDED NAMES (recently recommended):
 Based on this profile, recommend 12-15 people (actors, directors, cinematographers, composers) they should explore."""
         
         print("  → Calling OpenAI for magic people generation...")
-        model = "gpt-5" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
         
         response = await async_openai_client.responses.create(
             model=model,
@@ -5626,3 +5626,355 @@ async def get_staged_operation(stage_id: str):
             raise HTTPException(status_code=404, detail="Staged operation not found")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+# ============================================================================
+# CUSTOM SECTIONS - User-defined AI recommendation categories
+# ============================================================================
+
+async def generate_custom_section(
+    section_id: str,
+    title: str,
+    description: str,
+    media_type: str,  # 'movie' or 'tv'
+    device_id: str,
+    subscription_tier: str = "mega",
+    instance_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate AI-powered recommendations for a user-defined custom section."""
+
+    print(f"\n🎯✨ CUSTOM SECTION GENERATION STARTED")
+    print(f"  → Section: {title}")
+    print(f"  → Description: {description}")
+    print(f"  → Media Type: {media_type}")
+    print(f"  → Device: {device_id[:8]}...")
+    start_time = time.time()
+
+    try:
+        # Check if generation is already in progress for this section
+        existing = supabase.table('custom_sections_cache').select(
+            'is_generating, next_generation_at, generated_at, instance_key'
+        ).eq('section_id', section_id).eq('device_id', device_id).execute()
+
+        cache = {}
+        if existing.data:
+            cache = existing.data[0]
+            if not instance_key:
+                instance_key = cache.get('instance_key')
+
+            if cache.get('is_generating'):
+                print("  ⏭️  Generation already in progress")
+                return {"error": "Generation already in progress. Please wait."}
+
+            # Check if we need to regenerate (7 days)
+            if cache.get('next_generation_at'):
+                next_gen = datetime.fromisoformat(cache['next_generation_at'])
+                now_utc = datetime.now(timezone.utc)
+
+                if now_utc < next_gen:
+                    time_until = (next_gen - now_utc).total_seconds() / 3600  # hours
+                    print(f"  ℹ️  Section up to date - next refresh in {time_until:.1f} hours")
+                    return {"status": "up_to_date", "hours_until_refresh": round(time_until, 1)}
+
+        if not instance_key:
+            instance_key = get_device_instance_key(device_id)
+        if not instance_key:
+            return {"error": "Missing instance key. Send X-Instance-Key header."}
+
+        # Mark as generating
+        supabase.table('custom_sections_cache').upsert({
+            'section_id': section_id,
+            'device_id': device_id,
+            'instance_key': instance_key,
+            'title': title,
+            'description': description,
+            'media_type': media_type,
+            'recommendations': cache.get('recommendations') or [],
+            'is_generating': True,
+            'generation_started_at': datetime.now().isoformat()
+        }, on_conflict='section_id,device_id').execute()
+
+        # Fetch library
+        library_result = supabase.table('library_cache').select(
+            'movies' if media_type == 'movie' else 'shows'
+        ).eq('device_id', device_id).execute()
+
+        if not library_result.data:
+            supabase.table('custom_sections_cache').update({
+                'is_generating': False
+            }).eq('section_id', section_id).eq('device_id', device_id).execute()
+            return {"error": "Library not synced. Please sync your library first."}
+
+        library = library_result.data[0]
+        library_items = library.get('movies' if media_type == 'movie' else 'shows', [])
+
+        print(f"  ✓ Found {len(library_items)} {media_type}s in library")
+
+        # Build AI context
+        library_genres = {}
+        for item in library_items[:150]:
+            for genre in item.get('genres', []):
+                library_genres[genre] = library_genres.get(genre, 0) + 1
+
+        top_genres = sorted(library_genres.items(), key=lambda x: x[1], reverse=True)[:8]
+
+        context = f"""LIBRARY ANALYSIS:
+- Total {media_type.title()}s: {len(library_items)}
+- Top Genres: {', '.join([f"{g[0]} ({g[1]})" for g in top_genres])}
+
+USER'S CUSTOM SECTION REQUEST:
+Title: {title}
+Description: {description}
+
+Generate personalized recommendations that match the user's description while considering their library."""
+
+        # Build AI prompt
+        system_prompt = f"""You are an expert {media_type} recommendation engine creating personalized suggestions for a user's custom section.
+
+The user has described what they want to discover: "{description}"
+
+Your task:
+1. Analyze the user's request and their library preferences
+2. Generate {media_type} recommendations that match their description
+3. Provide specific, relevant reasons why each recommendation fits their request
+4. Score each recommendation (0-100) based on how well it matches their description
+
+Return ONLY valid JSON matching this structure:
+{{
+  "recommendations": [
+    {{
+      "title": "Movie/Show Title",
+      "year": 2020,
+      "director": "Director Name" (movies only, null for shows),
+      "genres": ["Genre1", "Genre2"],
+      "reason": "Why this matches the user's request (2-3 sentences)",
+      "match_score": 85,
+      "tmdb_id": 12345,
+      "poster_path": "/path.jpg"
+    }}
+  ]
+}}"""
+
+        user_message = f"""{context}
+
+Generate 15 {media_type} recommendations that match: "{description}"
+
+Focus on variety and relevance to the user's specific request."""
+
+        # Call OpenAI API
+        print(f"  → Calling GPT API for custom recommendations...")
+        api_start = time.time()
+
+        model = "gpt-5.2" if subscription_tier.lower() == "ultra" else "gpt-5-mini"
+
+        response = await async_openai_client.responses.create(
+            model=model,
+            instructions=system_prompt,
+            input=user_message,
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "custom_section",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "recommendations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "year": {"type": "integer"},
+                                        "director": {"type": ["string", "null"]},
+                                        "genres": {"type": "array", "items": {"type": "string"}},
+                                        "reason": {"type": "string"},
+                                        "match_score": {"type": "integer"},
+                                        "tmdb_id": {"type": ["integer", "null"]},
+                                        "poster_path": {"type": ["string", "null"]},
+                                    },
+                                    "required": ["title", "year", "genres", "reason", "match_score"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                        },
+                        "required": ["recommendations"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        )
+
+        api_duration_ms = int((time.time() - api_start) * 1000)
+        print(f"  ✓ GPT API call completed in {api_duration_ms}ms")
+
+        # Parse response
+        result = json.loads(response.text)
+        recommendations = result.get('recommendations', [])
+
+        print(f"  ✓ Generated {len(recommendations)} recommendations")
+
+        # Calculate next generation time (7 days from now)
+        next_generation = datetime.now(timezone.utc) + timedelta(days=7)
+        generation_duration_ms = int((time.time() - start_time) * 1000)
+
+        # Save to cache
+        supabase.table('custom_sections_cache').upsert({
+            'section_id': section_id,
+            'device_id': device_id,
+            'instance_key': instance_key,
+            'title': title,
+            'description': description,
+            'media_type': media_type,
+            'recommendations': recommendations,
+            'is_generating': False,
+            'generated_at': datetime.now().isoformat(),
+            'next_generation_at': next_generation.isoformat(),
+            'generation_duration_ms': generation_duration_ms,
+            'generation_started_at': None
+        }, on_conflict='section_id,device_id').execute()
+
+        print(f"✅ CUSTOM SECTION GENERATION COMPLETE ({generation_duration_ms}ms)")
+
+        return {
+            "status": "success",
+            "section_id": section_id,
+            "title": title,
+            "description": description,
+            "recommendations_count": len(recommendations),
+            "generated_at": datetime.now().isoformat(),
+            "next_generation_at": next_generation.isoformat(),
+            "generation_duration_ms": generation_duration_ms
+        }
+
+    except Exception as e:
+        print(f"❌ Custom section generation error: {e}")
+        import traceback
+        traceback.print_exc()
+
+        # Clear generating flag
+        try:
+            supabase.table('custom_sections_cache').update({
+                'is_generating': False
+            }).eq('section_id', section_id).eq('device_id', device_id).execute()
+        except:
+            pass
+
+        return {"error": str(e)}
+
+
+@app.post("/recommendations/custom-section/generate")
+async def generate_custom_section_endpoint(
+    request: dict,
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription),
+    x_subscription_tier: str = Header(default="mega"),
+    x_instance_key: Optional[str] = Header(default=None),
+):
+    """Generate AI-powered recommendations for a user-defined custom section."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+    subscription_tier = x_subscription_tier.lower()
+
+    # Require Mega or Ultra subscription
+    if subscription_tier not in ['mega', 'ultra']:
+        raise HTTPException(status_code=403, detail="Custom Sections require Mega or Ultra subscription")
+
+    # Extract request data
+    section_id = request.get('section_id')
+    title = request.get('title')
+    description = request.get('description')
+    media_type = request.get('media_type', 'movie')
+
+    if not section_id or not title or not description:
+        raise HTTPException(status_code=400, detail="Missing required fields: section_id, title, description")
+
+    if media_type not in ['movie', 'tv']:
+        raise HTTPException(status_code=400, detail="media_type must be 'movie' or 'tv'")
+
+    instance_key = x_instance_key.strip() if isinstance(x_instance_key, str) and x_instance_key.strip() else None
+    if not instance_key:
+        instance_key = get_device_instance_key(device_id)
+
+    try:
+        result = await generate_custom_section(
+            section_id=section_id,
+            title=title,
+            description=description,
+            media_type=media_type,
+            device_id=device_id,
+            subscription_tier=subscription_tier,
+            instance_key=instance_key
+        )
+
+        if "error" in result:
+            if "already in progress" in result["error"].lower():
+                raise HTTPException(status_code=409, detail=result["error"])
+            elif "not synced" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            elif "instance key" in result["error"].lower():
+                raise HTTPException(status_code=400, detail=result["error"])
+            else:
+                raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Custom section endpoint error: {e}")
+        raise HTTPException(status_code=500, detail="Custom section generation failed")
+
+
+@app.get("/recommendations/custom-section/{section_id}")
+async def get_custom_section(
+    section_id: str,
+    device_auth: tuple[str, str, str] = Depends(verify_device_subscription)
+):
+    """Retrieve cached custom section recommendations for a device."""
+
+    device_id, hmac_key, rc_customer_id = device_auth
+
+    try:
+        result = supabase.table('custom_sections_cache').select('*').eq(
+            'section_id', section_id
+        ).eq('device_id', device_id).execute()
+
+        def _clean_item(rec: dict, media_type: str) -> dict:
+            cleaned = dict(rec)
+            cleaned['title'] = (cleaned.get('title') or '').strip()
+            cleaned['year'] = int(cleaned.get('year') or 0)
+            cleaned['genres'] = [str(g) for g in cleaned.get('genres') or []]
+            cleaned['reason'] = cleaned.get('reason') or ''
+            score = cleaned.get('relevance_score') or cleaned.get('match_score') or 0
+            cleaned['match_score'] = int(score)
+            cleaned['tmdb_id'] = int(cleaned.get('tmdb_id') or 0)
+            cleaned['poster_path'] = cleaned.get('poster_path') or ''
+            cleaned['media_type'] = media_type
+            if media_type == 'movie':
+                cleaned['director'] = cleaned.get('director')
+            return cleaned
+
+        if not result.data:
+            return {
+                "title": "",
+                "description": "",
+                "recommendations": [],
+                "generated_at": None,
+                "next_generation_at": None
+            }
+
+        cache = result.data[0]
+        media_type = cache.get('media_type', 'movie')
+        recs_raw = cache.get('recommendations') or []
+        recs = [_clean_item(r, media_type) for r in recs_raw if (r.get('title') or '').strip()]
+
+        return {
+            "title": cache.get('title') or "",
+            "description": cache.get('description') or "",
+            "recommendations": recs,
+            "generated_at": cache.get('generated_at'),
+            "next_generation_at": cache.get('next_generation_at'),
+            "generation_duration_ms": cache.get('generation_duration_ms'),
+        }
+
+    except Exception as e:
+        print(f"❌ Error fetching custom section: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch custom section")

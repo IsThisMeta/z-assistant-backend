@@ -551,7 +551,12 @@ def decrypt_credentials(encrypted_data: dict, hmac_key: str) -> dict:
 
     return decrypted
 
-def cache_rc_verification(rc_customer_id: str, tier: str, expiry: Optional[datetime]) -> None:
+def cache_rc_verification(
+    rc_customer_id: str,
+    tier: str,
+    expiry: Optional[datetime],
+    original_app_user_id: Optional[str] = None,
+) -> None:
     """Cache RevenueCat verification result in Upstash"""
     if not redis_client:
         return
@@ -560,6 +565,7 @@ def cache_rc_verification(rc_customer_id: str, tier: str, expiry: Optional[datet
         cache_data = {
             "tier": tier,
             "expiry": expiry.isoformat() if expiry else None,
+            "original_app_user_id": original_app_user_id,
             "cached_at": datetime.now(timezone.utc).isoformat()
         }
         key = f"rc_verified:{rc_customer_id}"
@@ -592,8 +598,8 @@ def get_cached_rc_verification(rc_customer_id: str) -> Optional[dict]:
         logger.warning(f"Failed to get cached RC verification: {e}")
         return None
 
-def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
-    """Fetch subscription tier from RevenueCat and return (tier, expiry)"""
+def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime], Optional[str]]:
+    """Fetch subscription tier from RevenueCat and return (tier, expiry, original_app_user_id)."""
     if not REVENUECAT_SECRET_KEY:
         logger.error("RevenueCat secret key not configured!")
         raise HTTPException(status_code=500, detail="Subscription verification unavailable")
@@ -623,6 +629,7 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
 
     subscriber_data = rc_response.json()
     subscriber = subscriber_data.get("subscriber", {})
+    original_app_user_id = subscriber.get("original_app_user_id")
     # RevenueCat sometimes omits the sandbox flag for TestFlight/anonymous IDs.
     is_sandbox = (subscriber.get("is_sandbox") is True) or rc_customer_id.startswith("$RCAnonymousID")
     if is_sandbox:
@@ -704,7 +711,27 @@ def verify_rc_customer(rc_customer_id: str) -> tuple[str, Optional[datetime]]:
         tier_expiry.isoformat() if tier_expiry else "unknown",
     )
 
-    return tier, tier_expiry
+    return tier, tier_expiry, original_app_user_id
+
+
+def verify_supabase_user(authorization: Optional[str]) -> Optional[dict]:
+    """Return the Supabase user dict for a Bearer token, or None if not provided."""
+    if not authorization:
+        return None
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid authorization format. Use: Bearer <token>")
+    token = authorization.replace("Bearer ", "")
+    try:
+        user_response = supabase.auth.get_user(token)
+        user = user_response.user if hasattr(user_response, 'user') else user_response
+        if not user or not user.id:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+        return {"id": user.id, "email": getattr(user, "email", None)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Supabase auth verification error: %s", e)
+        raise HTTPException(status_code=401, detail="Authentication failed")
 
 async def check_rate_limit(device_id: str, rc_customer_id: str):
     """Check and enforce tier-based rate limits using cached RC data from Upstash"""
@@ -722,11 +749,12 @@ async def check_rate_limit(device_id: str, rc_customer_id: str):
                 "🧹 Expired cache for RC customer %s... refreshing",
                 rc_customer_id[:16],
             )
-            tier, expiry = verify_rc_customer(rc_customer_id)
-            cache_rc_verification(rc_customer_id, tier, expiry)
+            tier, expiry, original_app_user_id = verify_rc_customer(rc_customer_id)
+            cache_rc_verification(rc_customer_id, tier, expiry, original_app_user_id)
             cached_data = {
                 "tier": tier,
                 "expiry": expiry.isoformat() if expiry else None,
+                "original_app_user_id": original_app_user_id,
             }
 
         tier = cached_data.get("tier")
@@ -4506,7 +4534,10 @@ class DeviceRegisterRequest(BaseModel):
     subscription_tier: Optional[str] = None  # Client-reported tier hint (optional)
 
 @app.post("/device/register")
-async def register_device(request: DeviceRegisterRequest):
+async def register_device(
+    request: DeviceRegisterRequest,
+    authorization: Optional[str] = Header(default=None),
+):
     """Register a new device with its HMAC key - verifies Pro/Mega subscription via RevenueCat"""
     try:
         # Validate UUID format
@@ -4514,11 +4545,14 @@ async def register_device(request: DeviceRegisterRequest):
         device_id = str(device_uuid)
         active_tier: Optional[str] = None
 
+        supabase_user = verify_supabase_user(authorization)
+        supabase_user_id = supabase_user["id"] if supabase_user else None
+
         logger.info(
             "📥 Device registration request: device=%s user_id=%s tier=%s",
             device_id[:8],
-            request.user_id[:8] if request.user_id else "None",
-            request.subscription_tier or "unspecified"
+            supabase_user_id[:8] if supabase_user_id else "None",
+            request.subscription_tier or "unspecified",
         )
 
         # Verify subscription with RevenueCat (cache-first)
@@ -4529,17 +4563,21 @@ async def register_device(request: DeviceRegisterRequest):
 
         rc_customer_id = request.receipt_token
         tier_expiry: Optional[datetime] = None
+        original_app_user_id: Optional[str] = None
 
         # Check cache first
         cached_data = get_cached_rc_verification(rc_customer_id)
         if cached_data:
             active_tier = cached_data.get("tier")
             expiry_str = cached_data.get("expiry")
+            original_app_user_id = cached_data.get("original_app_user_id")
             tier_expiry = datetime.fromisoformat(expiry_str) if expiry_str else None
             logger.info(f"✅ Using cached {active_tier} tier for {rc_customer_id[:16]}...")
         else:
             # Cache miss - verify with RevenueCat API
-            active_tier, tier_expiry = verify_rc_customer(rc_customer_id)
+            active_tier, tier_expiry, original_app_user_id = verify_rc_customer(
+                rc_customer_id
+            )
             if request.subscription_tier and request.subscription_tier.lower() != active_tier:
                 logger.warning(
                     "Subscription tier mismatch for device %s: client=%s, revenuecat=%s",
@@ -4548,29 +4586,34 @@ async def register_device(request: DeviceRegisterRequest):
                     active_tier,
                 )
             # Cache the verified tier for 6 hours
-            cache_rc_verification(rc_customer_id, active_tier, tier_expiry)
+            cache_rc_verification(
+                rc_customer_id, active_tier, tier_expiry, original_app_user_id
+            )
+
+        # NOTE: Account↔subscription linking is intentionally NOT automatic.
+        # Users must explicitly link their account to the RevenueCat subscription.
 
         # Store device registration (HMAC key for authentication)
         # No need to sync subscriptions - tier is cached in Upstash!
         existing = supabase.table('device_keys').select('device_id').eq('device_id', device_id).execute()
 
         if existing.data:
-            # Update existing device's HMAC key, rc_customer_id, and user_id (if provided)
+            # Update existing device's HMAC key, rc_customer_id, and user_id (if available)
             update_data = {
                 'hmac_key': request.hmac_key,
                 'rc_customer_id': rc_customer_id,
                 'last_used': datetime.now().isoformat()
             }
-            if request.user_id:
-                update_data['user_id'] = request.user_id
+            if supabase_user_id:
+                update_data['user_id'] = supabase_user_id
 
             supabase.table('device_keys').update(update_data).eq('device_id', device_id).execute()
 
-            if request.user_id:
+            if supabase_user_id:
                 logger.info(
                     "🔄 Updated device %s for user %s%s",
                     device_id[:8],
-                    request.user_id[:8],
+                    supabase_user_id[:8],
                     f" (tier={active_tier})" if active_tier else "",
                 )
             else:
@@ -4585,16 +4628,16 @@ async def register_device(request: DeviceRegisterRequest):
                 'last_used': datetime.now().isoformat(),
                 'request_count': 0
             }
-            if request.user_id:
-                insert_data['user_id'] = request.user_id
+            if supabase_user_id:
+                insert_data['user_id'] = supabase_user_id
 
             supabase.table('device_keys').insert(insert_data).execute()
 
-            if request.user_id:
+            if supabase_user_id:
                 logger.info(
                     "✅ Registered device %s for user %s%s",
                     device_id[:8],
-                    request.user_id[:8],
+                    supabase_user_id[:8],
                     f" (tier={active_tier})" if active_tier else "",
                 )
             else:
@@ -4610,6 +4653,94 @@ async def register_device(request: DeviceRegisterRequest):
     except Exception as e:
         logger.error(f"Device registration error: {e}")
         raise HTTPException(status_code=500, detail="Registration failed")
+
+
+class AccountLinkRequest(BaseModel):
+    receipt_token: str  # RevenueCat subscriber ID (app_user_id/originalAppUserId)
+
+
+@app.post("/account/link")
+async def link_account(
+    request: AccountLinkRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Explicitly link the signed-in Supabase account to the active RevenueCat subscription anchor."""
+
+    supabase_user = verify_supabase_user(authorization)
+    if not supabase_user:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    user_id = supabase_user["id"]
+
+    if not request.receipt_token:
+        raise HTTPException(status_code=400, detail="Receipt token required")
+
+    rc_customer_id = request.receipt_token
+
+    cached = get_cached_rc_verification(rc_customer_id)
+    if cached:
+        tier = cached.get("tier")
+        expiry_str = cached.get("expiry")
+        expiry = datetime.fromisoformat(expiry_str) if expiry_str else None
+        original_app_user_id = cached.get("original_app_user_id")
+    else:
+        tier, expiry, original_app_user_id = verify_rc_customer(rc_customer_id)
+        cache_rc_verification(rc_customer_id, tier, expiry, original_app_user_id)
+
+    if not original_app_user_id:
+        # Force refresh once to obtain the stable subscription anchor.
+        tier, expiry, original_app_user_id = verify_rc_customer(rc_customer_id)
+        cache_rc_verification(rc_customer_id, tier, expiry, original_app_user_id)
+
+    if not tier or tier not in ("mega", "ultra", "supreme"):
+        raise HTTPException(
+            status_code=403,
+            detail="Mega/Ultra/Supreme subscription required to link an account",
+        )
+
+    # Prevent re-linking a paid subscription to a different account without an explicit unlink.
+    existing = supabase.table("account_subscriptions").select("user_id").eq(
+        "rc_original_app_user_id", original_app_user_id
+    ).execute()
+    if existing.data:
+        owner_user_id = existing.data[0].get("user_id")
+        if owner_user_id and str(owner_user_id) != str(user_id):
+            raise HTTPException(
+                status_code=409,
+                detail="This subscription is already linked to another account",
+            )
+
+    # Upsert by user_id (single linked subscription per account).
+    supabase.table("account_subscriptions").upsert(
+        {
+            "user_id": user_id,
+            "rc_original_app_user_id": original_app_user_id,
+            "tier": tier,
+            "expires_at": expiry.isoformat() if expiry else None,
+            # Keep product_id simple and stable for share quota logic.
+            "product_id": tier,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="user_id",
+    ).execute()
+
+    return {"success": True, "tier": tier}
+
+
+@app.post("/account/unlink")
+async def unlink_account(
+    authorization: Optional[str] = Header(default=None),
+):
+    """Unlink the signed-in Supabase account from any RevenueCat subscription anchor."""
+
+    supabase_user = verify_supabase_user(authorization)
+    if not supabase_user:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+
+    user_id = supabase_user["id"]
+
+    supabase.table("account_subscriptions").delete().eq("user_id", user_id).execute()
+    return {"success": True}
 
 @app.post("/chat")
 async def chat(
